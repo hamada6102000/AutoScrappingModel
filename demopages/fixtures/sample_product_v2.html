@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Aurora Wireless Headphones — ShopDemo</title>
+  <style>.hidden{display:none}</style>
+  <script>window.analytics = function(){ /* tracking noise */ };</script>
+</head>
+<body>
+  <!-- Redesigned layout (v2): same product data, new DOM structure and new
+       class names. Selectors generated against v1 will no longer match. -->
+  <header class="topbar">
+    <div class="brand">ShopDemo</div>
+    <nav class="nav-primary">
+      <a href="/">Home</a>
+      <a href="/deals">Deals</a>
+      <a href="/cart">Cart</a>
+    </nav>
+  </header>
+
+  <main class="pdp">
+    <section class="pdp-hero">
+      <div class="pdp-headline">
+        <h1 class="pdp-title">Aurora Wireless Headphones</h1>
+      </div>
+      <div class="pdp-badges">
+        <div class="badge">
+          <span class="sku-code">AUR-1024</span>
+        </div>
+        <div class="badge">
+          <span class="stars-score">4.6</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="pdp-buybox">
+      <div class="buybox-inner">
+        <div class="price-block">
+          <span class="amount">$149.99</span>
+        </div>
+        <div class="stock-status">In Stock</div>
+        <form action="/cart/add" method="post">
+          <button type="submit">Add to cart</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="pdp-details">
+      <div class="details-body">
+        <p>Over-ear wireless headphones with 40-hour battery life and active
+        noise cancellation.</p>
+      </div>
+    </section>
+  </main>
+
+  <aside class="cross-sell">
+    <h3>You may also like</h3>
+    <ul>
+      <li>Aurora Earbuds</li>
+      <li>Aurora Charging Dock</li>
+    </ul>
+  </aside>
+
+  <footer class="footer-bar">
+    <p>&copy; 2026 ShopDemo. All rights reserved.</p>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,116 @@
+{% extends "dashboard/base.html" %}
+{% block title %}{{ target.name }} · Self-Healing Scraper{% endblock %}
+{% block content %}
+  <div class="flex-between">
+    <div>
+      <h1>{{ target.name }}</h1>
+      <div class="sub">
+        <span class="pill {{ target.category }}">{{ target.get_category_display }}</span>
+        <a href="{{ target.url }}" target="_blank">{{ target.url }}</a>
+      </div>
+    </div>
+    <div class="row">
+      <form class="inline" method="post" action="{% url 'dashboard:simulate_change' %}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="/targets/{{ target.pk }}/">
+        <button class="btn warn" type="submit">
+          Simulate layout change (now: {{ active_version }})
+        </button>
+      </form>
+      <form class="inline" method="post" action="{% url 'dashboard:run_target' target.pk %}">
+        {% csrf_token %}
+        <button class="btn primary" type="submit">Run scrape</button>
+      </form>
+    </div>
+  </div>
+
+  {% if series %}
+    <div class="panel">
+      <h2 style="margin-top:0">Health over runs</h2>
+      <div class="chart">
+        {% for p in series %}
+          <a class="bar" href="{% url 'dashboard:run_detail' p.id %}"
+             title="Run #{{ p.id }} — {{ p.health }}% ({{ p.status }})"
+             style="height:{{ p.health }}%;background:{% if p.health >= 80 %}var(--ok){% elif p.health >= 50 %}var(--warn){% else %}var(--bad){% endif %}"></a>
+        {% endfor %}
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:6px">Oldest → newest. Click a bar to open the run.</div>
+    </div>
+  {% endif %}
+
+  <h2>Fields &amp; active XPath rules</h2>
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Type</th><th>Required</th><th>Active XPath (version)</th><th>Ground truth</th></tr>
+      </thead>
+      <tbody>
+        {% for f in fields %}
+          <tr>
+            <td><strong>{{ f.name }}</strong><div class="muted" style="font-size:12px">{{ f.description }}</div></td>
+            <td>{{ f.get_field_type_display }}</td>
+            <td>{% if f.is_required %}yes{% else %}<span class="muted">no</span>{% endif %}</td>
+            <td>
+              {% with r=f.active_rule %}
+                {% if r %}
+                  <code>{{ r.xpath }}</code>
+                  <div class="muted" style="font-size:12px">v{{ r.version }} · {{ r.get_source_display }}</div>
+                {% else %}
+                  <span class="muted">not generated yet</span>
+                {% endif %}
+              {% endwith %}
+            </td>
+            <td class="muted">{{ f.ground_truth|default:"—" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Recent runs</h2>
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>#</th><th>Status</th><th>Health</th><th>Fields</th><th>Struct. dist.</th><th>Heals</th><th>When</th></tr>
+      </thead>
+      <tbody>
+        {% for r in runs %}
+          <tr>
+            <td><a href="{% url 'dashboard:run_detail' r.pk %}">#{{ r.pk }}</a></td>
+            <td><span class="pill {{ r.status }}">{{ r.get_status_display }}</span></td>
+            <td>{{ r.health_score|floatformat:2 }}</td>
+            <td>{{ r.fields_extracted }}/{{ r.fields_total }}</td>
+            <td>{{ r.structural_distance|floatformat:3 }}</td>
+            <td>{% if r.healed %}<span class="pill healed">healed ×{{ r.heal_attempts }}</span>{% else %}{{ r.heal_attempts }}{% endif %}</td>
+            <td class="muted">{{ r.started_at|date:"M j, H:i:s" }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="7" class="muted">No runs yet — click “Run scrape”.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if change_events %}
+    <h2>Change events</h2>
+    <div class="panel">
+      <table>
+        <thead><tr><th>When</th><th>Type</th><th>Resolution</th><th>Affected fields</th><th>Recovery</th></tr></thead>
+        <tbody>
+          {% for e in change_events %}
+            <tr>
+              <td class="muted">{{ e.detected_at|date:"M j, H:i:s" }}</td>
+              <td>{{ e.get_change_type_display }}</td>
+              <td>
+                {% if e.resolution == 'auto_healed' %}<span class="pill healed">auto-healed</span>
+                {% else %}<span class="pill failed">unresolved</span>{% endif %}
+              </td>
+              <td class="muted">{{ e.affected_fields|join:", " }}</td>
+              <td class="muted">{% if e.time_to_recovery_ms %}{{ e.time_to_recovery_ms }} ms{% else %}—{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+{% endblock %}

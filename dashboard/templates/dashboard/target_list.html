@@ -1,0 +1,75 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Targets · Self-Healing Scraper{% endblock %}
+{% block content %}
+  <h1>Scrape Targets</h1>
+  <div class="sub">
+    Four-layer self-healing pipeline: fetch &amp; prune → LLM XPath generation →
+    validate + health score → self-healing loop.
+  </div>
+
+  <div class="grid cards">
+    <div class="card stat"><div class="n">{{ stats.targets }}</div><div class="l">Targets</div></div>
+    <div class="card stat"><div class="n">{{ stats.runs }}</div><div class="l">Runs</div></div>
+    <div class="card stat"><div class="n">{{ stats.healed }}</div><div class="l">Auto-Healed</div></div>
+    <div class="card stat"><div class="n">{{ stats.change_events }}</div><div class="l">Change Events</div></div>
+    <div class="card stat"><div class="n">{{ stats.avg_health|floatformat:2 }}</div><div class="l">Avg Health</div></div>
+  </div>
+
+  <div class="banner">
+    <div class="flex-between">
+      <div>
+        <strong>Demo site layout:</strong>
+        <span class="pill {% if active_version == 'v2' %}healed{% else %}success{% endif %}">
+          {% if active_version == 'v2' %}v2 — redesigned{% else %}v1 — original{% endif %}
+        </span>
+        <span class="muted"> — flip it, then re-run a scrape to watch the pipeline self-heal.</span>
+      </div>
+      <form class="inline" method="post" action="{% url 'dashboard:simulate_change' %}">
+        {% csrf_token %}
+        <button class="btn warn" type="submit">Simulate layout change</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>Target</th><th>Category</th><th>Fields</th><th>Runs</th><th>Latest health</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for t in targets %}
+          <tr>
+            <td><a href="{% url 'dashboard:target_detail' t.pk %}"><strong>{{ t.name }}</strong></a>
+              <div class="muted" style="font-size:12px">{{ t.url }}</div></td>
+            <td><span class="pill {{ t.category }}">{{ t.get_category_display }}</span></td>
+            <td>{{ t.fields.count }}</td>
+            <td>{{ t.runs.count }}</td>
+            <td style="min-width:120px">
+              {% with h=t.latest_health %}
+                {% if h is not None %}
+                  <div class="health-bar">
+                    <span style="width:{% widthratio h 1 100 %}%;background:{% if h >= 0.8 %}var(--ok){% elif h >= 0.5 %}var(--warn){% else %}var(--bad){% endif %}"></span>
+                  </div>
+                  <span class="muted" style="font-size:12px">{{ h|floatformat:2 }}</span>
+                {% else %}
+                  <span class="muted">no runs yet</span>
+                {% endif %}
+              {% endwith %}
+            </td>
+            <td>
+              <form class="inline" method="post" action="{% url 'dashboard:run_target' t.pk %}">
+                {% csrf_token %}
+                <button class="btn primary" type="submit">Run scrape</button>
+              </form>
+            </td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="6" class="muted">
+            No targets yet. Seed the demo with
+            <code>python manage.py seed_demo</code>.
+          </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

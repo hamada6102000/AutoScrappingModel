@@ -1,0 +1,100 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Self-Healing Scraper{% endblock %}</title>
+  <style>
+    :root{
+      --bg:#0f172a; --panel:#1e293b; --panel2:#273449; --line:#334155;
+      --ink:#e2e8f0; --muted:#94a3b8; --brand:#38bdf8; --brand2:#818cf8;
+      --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --heal:#a855f7;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+      background:var(--bg);color:var(--ink);line-height:1.5}
+    a{color:var(--brand);text-decoration:none}
+    a:hover{text-decoration:underline}
+    header.top{display:flex;align-items:center;justify-content:space-between;
+      padding:14px 28px;background:linear-gradient(90deg,#0b1220,#111c33);
+      border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+    header.top .brand{font-weight:700;font-size:18px;letter-spacing:.2px}
+    header.top .brand span{color:var(--brand)}
+    header.top nav a{margin-left:20px;color:var(--muted);font-size:14px}
+    header.top nav a:hover{color:var(--ink)}
+    main{max-width:1080px;margin:0 auto;padding:28px}
+    h1{font-size:24px;margin:0 0 4px}
+    h2{font-size:17px;margin:26px 0 12px;color:var(--ink)}
+    .sub{color:var(--muted);font-size:14px;margin-bottom:20px}
+    .grid{display:grid;gap:16px}
+    .cards{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+    .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+    .stat .n{font-size:26px;font-weight:700}
+    .stat .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+    .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:18px}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+    th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+    tr:last-child td{border-bottom:none}
+    code{background:#0b1220;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12.5px;color:#cbd5e1;word-break:break-all}
+    .pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600}
+    .pill.success{background:rgba(34,197,94,.15);color:#4ade80}
+    .pill.healed{background:rgba(168,85,247,.16);color:#c084fc}
+    .pill.degraded,.pill.failed{background:rgba(239,68,68,.15);color:#f87171}
+    .pill.running,.pill.pending{background:rgba(148,163,184,.15);color:#cbd5e1}
+    .pill.ecommerce,.pill.news,.pill.finance,.pill.jobs,.pill.academic,.pill.other{background:rgba(56,189,248,.14);color:#7dd3fc}
+    .btn{display:inline-block;border:1px solid var(--line);background:var(--panel2);color:var(--ink);
+      padding:8px 14px;border-radius:9px;font-size:13.5px;font-weight:600;cursor:pointer}
+    .btn:hover{border-color:var(--brand);text-decoration:none}
+    .btn.primary{background:linear-gradient(90deg,#0284c7,#4f46e5);border:none}
+    .btn.warn{background:rgba(245,158,11,.14);border-color:rgba(245,158,11,.4);color:#fbbf24}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    form.inline{display:inline}
+    .msg{padding:11px 15px;border-radius:10px;margin-bottom:10px;font-size:14px;border:1px solid}
+    .msg.success{background:rgba(34,197,94,.1);border-color:rgba(34,197,94,.35);color:#86efac}
+    .msg.info{background:rgba(56,189,248,.1);border-color:rgba(56,189,248,.35);color:#7dd3fc}
+    .msg.warning{background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.35);color:#fcd34d}
+    .msg.error{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.35);color:#fca5a5}
+    .health-bar{height:8px;border-radius:6px;background:#0b1220;overflow:hidden}
+    .health-bar > span{display:block;height:100%}
+    .muted{color:var(--muted)}
+    .chart{display:flex;align-items:flex-end;gap:4px;height:80px;padding-top:6px}
+    .chart .bar{flex:1;min-width:6px;border-radius:3px 3px 0 0;background:var(--brand);opacity:.85}
+    .trace{list-style:none;padding:0;margin:0}
+    .trace li{padding:8px 0 8px 22px;position:relative;border-bottom:1px dashed var(--line);font-size:13.5px}
+    .trace li:before{content:"";position:absolute;left:2px;top:13px;width:9px;height:9px;border-radius:50%}
+    .trace li.ok:before{background:var(--ok)}
+    .trace li.no:before{background:var(--bad)}
+    .trace .step{font-weight:700;color:#cbd5e1;margin-right:8px}
+    .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 18px;font-size:14px}
+    .kv dt{color:var(--muted)}
+    .flex-between{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+    .footer{color:var(--muted);font-size:12.5px;text-align:center;padding:24px}
+    .banner{background:linear-gradient(90deg,rgba(56,189,248,.1),rgba(129,140,248,.08));
+      border:1px solid var(--line);border-radius:12px;padding:14px 18px;margin-bottom:18px;font-size:14px}
+  </style>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Self-Healing <span>Scraper</span></div>
+    <nav>
+      <a href="{% url 'dashboard:target_list' %}">Targets</a>
+      <a href="{% url 'dashboard:change_events' %}">Change Events</a>
+      <a href="/admin/">Admin</a>
+    </nav>
+  </header>
+  <main>
+    {% if messages %}
+      {% for m in messages %}
+        <div class="msg {{ m.tags }}">{{ m }}</div>
+      {% endfor %}
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <div class="footer">
+    LLM-Driven XPath Regeneration &middot; four-layer closed-loop pipeline &middot;
+    reference implementation
+  </div>
+</body>
+</html>

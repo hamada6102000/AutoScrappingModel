@@ -1,0 +1,130 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Run #{{ run.pk }} · Self-Healing Scraper{% endblock %}
+{% block content %}
+  <div class="flex-between">
+    <div>
+      <h1>Run #{{ run.pk }} <span class="pill {{ run.status }}">{{ run.get_status_display }}</span></h1>
+      <div class="sub">
+        <a href="{% url 'dashboard:target_detail' run.target.pk %}">{{ run.target.name }}</a>
+        · {{ run.started_at|date:"M j, Y H:i:s" }}
+      </div>
+    </div>
+    <form class="inline" method="post" action="{% url 'dashboard:run_target' run.target.pk %}">
+      {% csrf_token %}
+      <button class="btn primary" type="submit">Run again</button>
+    </form>
+  </div>
+
+  <div class="grid cards">
+    <div class="card stat">
+      <div class="n" style="color:{% if run.health_score >= 0.8 %}var(--ok){% elif run.health_score >= 0.5 %}var(--warn){% else %}var(--bad){% endif %}">{{ run.health_percent }}%</div>
+      <div class="l">Health</div>
+    </div>
+    <div class="card stat"><div class="n">{{ run.fields_extracted }}/{{ run.fields_total }}</div><div class="l">Fields</div></div>
+    <div class="card stat"><div class="n">{{ run.xpath_failure_rate|floatformat:2 }}</div><div class="l">Failure rate</div></div>
+    <div class="card stat"><div class="n">{{ run.structural_distance|floatformat:3 }}</div><div class="l">Struct. dist.</div></div>
+    <div class="card stat"><div class="n">{{ run.heal_attempts }}</div><div class="l">Heal attempts</div></div>
+    <div class="card stat"><div class="n">{{ run.duration_ms }}<span style="font-size:13px"> ms</span></div><div class="l">Duration</div></div>
+  </div>
+
+  <h2>Pipeline trace</h2>
+  <div class="panel">
+    <ul class="trace">
+      {% for step in run.log %}
+        <li class="{% if step.ok %}ok{% else %}no{% endif %}">
+          <span class="step">{{ step.step }}</span>{{ step.detail }}
+        </li>
+      {% empty %}
+        <li class="muted">No trace recorded.</li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  <h2>Extracted records</h2>
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Value</th><th>Ground truth</th><th>XPath used</th><th>OK</th></tr>
+      </thead>
+      <tbody>
+        {% for rec in records %}
+          <tr>
+            <td><strong>{{ rec.field.name }}</strong></td>
+            <td>{{ rec.normalized_value|default:"—" }}</td>
+            <td>
+              {% if rec.matches_ground_truth is None %}<span class="muted">—</span>
+              {% elif rec.matches_ground_truth %}<span class="pill success">match</span>
+              {% else %}<span class="pill failed">mismatch</span>{% endif %}
+            </td>
+            <td>{% if rec.xpath_used %}<code>{{ rec.xpath_used.xpath }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+            <td>{% if rec.success %}<span class="pill success">ok</span>{% else %}<span class="pill failed">fail</span>{% endif %}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="muted">No records.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="grid" style="grid-template-columns:1fr 1fr">
+    <div>
+      <h2>LLM / generator calls</h2>
+      <div class="panel">
+        <table>
+          <thead><tr><th>Provider</th><th>Purpose</th><th>Tokens</th><th>Latency</th></tr></thead>
+          <tbody>
+            {% for c in llm_calls %}
+              <tr>
+                <td>{{ c.provider }}<div class="muted" style="font-size:11px">{{ c.model }}</div></td>
+                <td>{{ c.get_purpose_display }}</td>
+                <td>{{ c.total_tokens }}</td>
+                <td>{{ c.latency_ms }} ms</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="4" class="muted">No calls.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <h2>Failure memory</h2>
+      <div class="panel">
+        <table>
+          <thead><tr><th>Field</th><th>Reason</th><th>Failed XPath</th></tr></thead>
+          <tbody>
+            {% for f in failures %}
+              <tr>
+                <td>{{ f.field.name }}</td>
+                <td class="muted">{{ f.reason }}</td>
+                <td><code>{{ f.failed_xpath }}</code></td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="3" class="muted">No failures recorded.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {% if change_events %}
+    <h2>Change events</h2>
+    <div class="panel">
+      <table>
+        <thead><tr><th>Type</th><th>Resolution</th><th>Affected</th><th>Struct. dist.</th><th>Recovery</th></tr></thead>
+        <tbody>
+          {% for e in change_events %}
+            <tr>
+              <td>{{ e.get_change_type_display }}</td>
+              <td>{% if e.resolution == 'auto_healed' %}<span class="pill healed">auto-healed</span>{% else %}<span class="pill failed">unresolved</span>{% endif %}</td>
+              <td class="muted">{{ e.affected_fields|join:", " }}</td>
+              <td>{{ e.structural_distance|floatformat:3 }}</td>
+              <td class="muted">{% if e.time_to_recovery_ms %}{{ e.time_to_recovery_ms }} ms{% else %}—{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+{% endblock %}

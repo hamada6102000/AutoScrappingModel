@@ -1,0 +1,35 @@
+{% extends "dashboard/base.html" %}
+{% block title %}Change Events · Self-Healing Scraper{% endblock %}
+{% block content %}
+  <h1>Layout Change Events</h1>
+  <div class="sub">
+    Every detected structural change and how the self-healing loop resolved it —
+    the primary log for self-healing evaluation metrics.
+  </div>
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>When</th><th>Target</th><th>Type</th><th>Resolution</th><th>Affected fields</th><th>Struct. dist.</th><th>Recovery</th><th>Run</th></tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+          <tr>
+            <td class="muted">{{ e.detected_at|date:"M j, H:i:s" }}</td>
+            <td><a href="{% url 'dashboard:target_detail' e.target.pk %}">{{ e.target.name }}</a></td>
+            <td>{{ e.get_change_type_display }}</td>
+            <td>
+              {% if e.resolution == 'auto_healed' %}<span class="pill healed">auto-healed</span>
+              {% else %}<span class="pill failed">unresolved</span>{% endif %}
+            </td>
+            <td class="muted">{{ e.affected_fields|join:", " }}</td>
+            <td>{{ e.structural_distance|floatformat:3 }}</td>
+            <td class="muted">{% if e.time_to_recovery_ms %}{{ e.time_to_recovery_ms }} ms{% else %}—{% endif %}</td>
+            <td><a href="{% url 'dashboard:run_detail' e.run.pk %}">#{{ e.run.pk }}</a></td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="8" class="muted">No change events yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

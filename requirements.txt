@@ -1,0 +1,14 @@
+# Core
+Django==5.1.15
+lxml==6.1.2
+requests==2.34.2
+python-dotenv==1.2.3
+
+# LLM providers
+# Anthropic / Claude is the primary real provider. Requires an Anthropic API
+# key (ANTHROPIC_API_KEY) — separate from a claude.ai chat subscription.
+anthropic==1.2.0
+
+# Optional providers — uncomment to enable:
+# openai>=1.0            # for SCRAPER_LLM_PROVIDER=openai
+# (Ollama needs no Python package; it talks to a local Ollama server over HTTP.)

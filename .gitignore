@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+build/
+dist/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Django
+db.sqlite3
+db.sqlite3-journal
+/staticfiles/
+media/
+
+# Project runtime state
+demo_state.txt
+
+# Secrets / local config
+.env
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Screenshots / scratch
+shot_*.png
+shots.py
