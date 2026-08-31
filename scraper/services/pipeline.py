@@ -22,6 +22,7 @@ from django.utils import timezone
 
 from ..llm.base import FieldSpec, LLMProvider
 from ..llm.factory import get_provider_safe
+from ..llm.heuristic import HeuristicProvider
 from ..models import (
     ChangeEvent,
     ChangeType,
@@ -118,17 +119,21 @@ class ScrapePipeline:
             field__target=target, is_active=True
         ).exists()
         if not has_rules:
-            result, latency = generate(self.provider, fr.pruned_html, specs)
+            result, latency, used, err = self._call_provider(
+                fr.pruned_html, specs, failure_history=None
+            )
             self._store_rules(fields, result.xpaths, fr.dom_signature, run,
                               purpose=LLMPurpose.INITIAL, latency=latency,
-                              provider=self.provider)
+                              provider=used, error=err)
             run.token_usage += result.total_tokens
             trace.append({
                 "step": "llm-generate",
-                "ok": True,
-                "detail": f"{self.provider.name}/{result.model}: generated "
-                          f"{len(result.xpaths)}/{len(fields)} XPaths "
-                          f"({latency} ms)",
+                "ok": not err,
+                "detail": (
+                    f"{used.name}/{result.model}: generated "
+                    f"{len(result.xpaths)}/{len(fields)} XPaths ({latency} ms)"
+                    + (f" — {self.provider.name} failed, used heuristic fallback ({err})" if err else "")
+                ),
             })
 
         # --- extract + validate + health ------------------------------
@@ -189,21 +194,24 @@ class ScrapePipeline:
             ]
             hints = build_failure_hints(failed_outcomes) + self._recent_memory(target)
 
-            result, latency = regenerate(
-                self.provider, fr.pruned_html, failed_specs, hints
+            result, latency, used, err = self._call_provider(
+                fr.pruned_html, failed_specs, failure_history=hints
             )
             run.heal_latency_ms += latency
             run.token_usage += result.total_tokens
             self._store_rules(
                 [name_to_field[n] for n in result.xpaths if n in name_to_field],
                 result.xpaths, fr.dom_signature, run,
-                purpose=LLMPurpose.HEALING, latency=latency, provider=self.provider,
+                purpose=LLMPurpose.HEALING, latency=latency, provider=used, error=err,
             )
             trace.append({
                 "step": f"self-heal:attempt-{attempt}",
-                "ok": True,
-                "detail": f"regenerated {len(result.xpaths)} XPath(s) with "
-                          f"failure-history memory ({latency} ms)",
+                "ok": not err,
+                "detail": (
+                    f"{used.name} regenerated {len(result.xpaths)} XPath(s) with "
+                    f"failure-history memory ({latency} ms)"
+                    + (f" — {self.provider.name} failed, used heuristic fallback ({err})" if err else "")
+                ),
             })
 
             # re-extract everything and re-score.
@@ -242,6 +250,31 @@ class ScrapePipeline:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _call_provider(self, pruned_html, specs, failure_history):
+        """
+        Call the configured provider (generation or regeneration). If a real
+        provider fails — e.g. a free-tier rate limit, network error, or bad key
+        — fall back to the offline heuristic so the run still completes instead
+        of crashing. Returns (result, latency_ms, provider_used, error_str).
+        """
+        try:
+            if failure_history is None:
+                result, latency = generate(self.provider, pruned_html, specs)
+            else:
+                result, latency = regenerate(
+                    self.provider, pruned_html, specs, failure_history
+                )
+            return result, latency, self.provider, ""
+        except Exception as exc:  # pragma: no cover - network/runtime dependent
+            fallback = HeuristicProvider()
+            if failure_history is None:
+                result, latency = generate(fallback, pruned_html, specs)
+            else:
+                result, latency = regenerate(
+                    fallback, pruned_html, specs, failure_history
+                )
+            return result, latency, fallback, str(exc)[:200]
+
     def _extract(self, target, fields) -> list[FieldOutcome]:
         # Re-fetch active rules (they may have just been regenerated).
         rules = {
@@ -257,7 +290,7 @@ class ScrapePipeline:
         return extract_fields(self._pruned_html, field_rules)
 
     def _store_rules(self, fields, xpaths: dict, dom_signature: str, run,
-                     purpose: str, latency: int, provider) -> None:
+                     purpose: str, latency: int, provider, error: str = "") -> None:
         source = RuleSource.HEURISTIC if provider.name == "heuristic" else RuleSource.LLM
         for f in fields:
             xpath = xpaths.get(f.name, "")
@@ -281,7 +314,8 @@ class ScrapePipeline:
             model=getattr(provider, "model", provider.name),
             purpose=purpose,
             latency_ms=latency,
-            success=bool(xpaths),
+            success=bool(xpaths) and not error,
+            error=error,
         )
 
     def _persist_records(self, run, fields, outcomes: list[FieldOutcome]) -> None:

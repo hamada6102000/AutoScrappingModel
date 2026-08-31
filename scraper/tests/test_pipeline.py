@@ -96,3 +96,25 @@ class PipelineTests(TestCase):
         self.assertFalse(run2.healed)
         # No new change event on a stable re-run.
         self.assertEqual(ChangeEvent.objects.count(), 0)
+
+    def test_falls_back_to_heuristic_when_provider_fails(self):
+        """A failing real provider (e.g. rate limit) must not crash the run."""
+        from scraper.llm.base import LLMProvider
+
+        class FailingProvider(LLMProvider):
+            name = "groq"
+            model = "llama-3.3-70b-versatile"
+
+            def generate_xpaths(self, pruned_html, fields, failure_history=None):
+                raise RuntimeError("429 rate limit exceeded")
+
+        pipeline = ScrapePipeline(provider=FailingProvider())
+        run = pipeline.run(self.target, html=self.v1)
+
+        # Heuristic fallback still extracted everything.
+        self.assertEqual(run.status, RunStatus.SUCCESS)
+        self.assertEqual(run.fields_extracted, 5)
+        # The failure was recorded on the LLM call log.
+        call = run.llm_calls.first()
+        self.assertIsNotNone(call)
+        self.assertIn("rate limit", call.error)
