@@ -9,6 +9,9 @@ python-dotenv==1.2.3
 # key (ANTHROPIC_API_KEY) — separate from a claude.ai chat subscription.
 anthropic==1.2.0
 
+# Groq (FREE, recommended) needs NO extra package — it uses `requests` against
+# Groq's OpenAI-compatible API. Just set GROQ_API_KEY (free at console.groq.com).
+
 # Optional providers — uncomment to enable:
 # openai>=1.0            # for SCRAPER_LLM_PROVIDER=openai
 # (Ollama needs no Python package; it talks to a local Ollama server over HTTP.)

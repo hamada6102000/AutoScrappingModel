@@ -94,22 +94,39 @@ Set `SCRAPER_LLM_PROVIDER` (env var or `.env` — copy from `.env.example`):
 | Provider | Value | Notes |
 |----------|-------|-------|
 | Heuristic (default) | `heuristic` | Offline, no keys. Re-derives XPaths from the DOM. |
-| **Claude (Anthropic)** | `anthropic` | Primary real provider. Needs `ANTHROPIC_API_KEY`. |
-| OpenAI GPT | `openai` | Needs `OPENAI_API_KEY` and `pip install openai`. |
+| **Groq (free)** | `groq` | **Free**, fast LLaMA inference. Needs a free `GROQ_API_KEY`. |
+| Claude (Anthropic) | `anthropic` | Paid API. Needs `ANTHROPIC_API_KEY`. |
+| OpenAI GPT | `openai` | Paid. Needs `OPENAI_API_KEY` and `pip install openai`. |
 | Ollama / LLaMA | `ollama` | Free/local. Needs a running Ollama server + a pulled model. |
 
-> ℹ️ **About Claude access.** The `anthropic` provider uses the **Anthropic API**
-> (an API key from **console.anthropic.com**, billed separately). A **claude.ai
-> Pro/Team/Enterprise chat subscription is _not_ the same thing** and cannot
-> authenticate API calls. Until you add a key, keep `SCRAPER_LLM_PROVIDER=heuristic`
-> — everything (including the self-healing demo) still works.
+### Use the free Groq LLM (recommended)
 
-```bash
-# Example: use Claude
-export SCRAPER_LLM_PROVIDER=anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
-python manage.py run_scrape --target 1 --provider anthropic
-```
+Groq serves LLaMA models for free (rate-limited, no cost) via an OpenAI-compatible
+API — no extra Python package required.
+
+1. Sign in at **https://console.groq.com** and create a free API key at
+   **https://console.groq.com/keys**.
+2. Configure it (either export the vars, or put them in `.env`):
+
+   ```bash
+   export SCRAPER_LLM_PROVIDER=groq
+   export GROQ_API_KEY=gsk_...your_key...
+   # optional: export GROQ_MODEL=llama-3.1-8b-instant   # faster/lighter
+   ```
+3. Run it:
+
+   ```bash
+   python manage.py run_scrape --target 1 --provider groq
+   ```
+
+Default model is `llama-3.3-70b-versatile`; `llama-3.1-8b-instant` is faster and
+lighter on the free rate limits. If a key is missing or invalid the pipeline
+safely falls back to the heuristic provider (it never crashes).
+
+> ℹ️ **About Claude access.** The `anthropic` provider uses the **Anthropic API**
+> (a key from **console.anthropic.com**, billed separately). A **claude.ai
+> Pro/Team/Enterprise chat subscription is _not_ the same thing** and cannot
+> authenticate API calls — which is why Groq is wired in as the free option.
 
 All providers implement the same `LLMProvider` interface
 (`scraper/llm/base.py`), so swapping one in changes nothing else in the pipeline.
@@ -126,6 +143,7 @@ scraper/                Core app (Models + services + LLM providers)
   llm/                  Pluggable provider layer
     base.py             LLMProvider interface + data structures
     heuristic.py        Offline provider (default)
+    groq_provider.py    Free LLaMA provider (Groq, OpenAI-compatible)
     anthropic_provider.py / openai_provider.py / ollama_provider.py
     prompts.py          Prompt construction + JSON parsing
     factory.py          Resolve provider from settings

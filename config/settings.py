@@ -122,11 +122,16 @@ MESSAGE_STORAGE = "django.contrib.messages.storage.session.SessionStorage"
 # (Section 5.2, Table 5.1: Target Performance Metrics).
 SCRAPER = {
     # Which LLM provider drives XPath generation / regeneration.
-    # Options: "heuristic" (offline, zero-config default), "anthropic",
-    #          "openai", "ollama".
+    # Options: "heuristic" (offline, zero-config default), "groq" (free),
+    #          "anthropic", "openai", "ollama".
     "LLM_PROVIDER": os.getenv("SCRAPER_LLM_PROVIDER", "heuristic"),
 
-    # Anthropic / Claude (primary real provider).
+    # Groq (free, fast LLaMA inference — get a free key at console.groq.com).
+    "GROQ_API_KEY": os.getenv("GROQ_API_KEY", ""),
+    "GROQ_MODEL": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+    "GROQ_HOST": os.getenv("GROQ_HOST", "https://api.groq.com/openai/v1"),
+
+    # Anthropic / Claude (paid API — separate from claude.ai subscription).
     "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
     "ANTHROPIC_MODEL": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
 

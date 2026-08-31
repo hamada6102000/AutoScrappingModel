@@ -34,6 +34,15 @@ def get_provider(name: str | None = None) -> LLMProvider:
             model=cfg.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
         )
 
+    if name == "groq":
+        from .groq_provider import GroqProvider
+
+        return GroqProvider(
+            api_key=cfg.get("GROQ_API_KEY", ""),
+            model=cfg.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            host=cfg.get("GROQ_HOST", "https://api.groq.com/openai/v1"),
+        )
+
     if name == "openai":
         from .openai_provider import OpenAIProvider
 
