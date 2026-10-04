@@ -472,6 +472,20 @@ def paired_tests(data, conds, own: dict | None = None) -> list[dict]:
     return out
 
 
+def restrict_own(data, own: dict) -> dict:
+    """Keep, for every module, only the chains it completed (a chain stopped
+    half-way, e.g. by a quota stop, is left out until it is finished). Runs of
+    other conditions (external baselines, natural changes) are kept."""
+    keep = {rid for rid, r in data["runs"].items()
+            if r["condition"] not in own or not r["rep"] or (r["site"], r["rep"]) in own[r["condition"]]}
+    out = dict(data)
+    out["runs"] = {rid: r for rid, r in data["runs"].items() if rid in keep}
+    out["records"] = [r for r in data["records"] if r["run_id"] in keep]
+    out["events"] = [e for e in data["events"] if e["run_id"] in keep]
+    out["calls"] = [c for c in data["calls"] if c["run_id"] in keep]
+    return out
+
+
 def scope_of(chains: set) -> dict:
     sites = sorted({s for s, _ in chains})
     return {"sites": len(sites), "site_keys": sites, "repetitions": sorted({r for _, r in chains}),
@@ -490,6 +504,8 @@ def build(exp) -> dict:
     # all sites; LLM modules: the sites they were executed on). The
     # like-for-like table uses only the chains every module completed.
     own_chains = {c: complete_chains(data, c, n_steps) for c in module_conds}
+    stored = {"runs": len(data["runs"]), "records": len(data["records"]), "events": len(data["events"])}
+    data = restrict_own(data, own_chains)
     chains = common_chains(data, module_conds, n_steps)
     compared = restrict(data, chains)
     modules = []
@@ -701,6 +717,7 @@ def build(exp) -> dict:
             "runs": len(data["runs"]),
             "records": len(data["records"]),
             "change_events": len(data["events"]),
+            "stored_runs_including_unfinished_chains": stored["runs"],
         },
         "table_5_1": table51,
         "initial": _f(initial),
