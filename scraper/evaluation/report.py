@@ -166,12 +166,17 @@ def label_breaking(data: dict) -> None:
         run["prev_clean"] = None
         fields = data["site_fields"].get(run["site"], [])
         now = {f: pre.get((run["id"], f), final.get((run["id"], f))) for f in fields}
-        labelled_now = [v for v in now.values() if v is not None]
-        # degraded: some field is actually wrong before healing at this step
-        # (regardless of when it broke) — the ground truth for failure alarms.
-        run["degraded"] = (False in labelled_now) if labelled_now else None
         if not run["step"]:
+            run["degraded"] = None
             continue
+        # degraded: a field that this module extracted correctly from the
+        # original page (t0) is wrong before healing at this step — the ground
+        # truth for failure alarms. Fields already wrong at t0 are extraction
+        # errors, not failures a monitor could detect, so they are left out.
+        t0 = index.get((run["condition"], run["site"], run["rep"], 0))
+        good_t0 = [f for f in fields if t0 and final.get((t0["id"], f)) is True]
+        checked = [now.get(f) for f in good_t0 if now.get(f) is not None]
+        run["degraded"] = (False in checked) if checked else None
         prev = index.get((run["condition"], run["site"], run["rep"], run["step"] - 1))
         if prev is None:
             continue
@@ -368,8 +373,9 @@ def module_rows(data, conds) -> list[dict]:
         monitoring = _runs(data, condition=c, step_min=1)
         degraded = [r for r in monitoring if r["degraded"] is not None]
         scored = sum(1 for r in recs if r["has_gt"])
+        sites_run = len({r["site"] for r in _runs(data, condition=c)})
         rows.append({
-            "condition": c, "module": info["label"],
+            "condition": c, "module": info["label"], "sites": sites_run,
             "field_decisions": len(recs), "scored_decisions": scored,
             "initial_accuracy": init["field_accuracy"], "initial_precision": init["precision"],
             "initial_recall": init["recall"], "initial_f1": init["f1"],
@@ -382,8 +388,13 @@ def module_rows(data, conds) -> list[dict]:
             "alarm_false_positive_rate": det["fpr"] if det else None,
             "false_alarms_per_monitoring_run": det["false_alarm_share"] if det else None,
             "silent_failures": det["fn"] if det else None,
-            "breaking_events": heal["breaking_events"] if heal else None,
+            "breaking_events": sum(1 for r in monitoring if r["breaking"]),
+            "detected_breaking_events": sum(1 for r in monitoring if r["breaking"] and r["detected"]),
+            "change_detection_recall": M.safe_div(sum(1 for r in monitoring if r["breaking"] and r["detected"]),
+                                                  sum(1 for r in monitoring if r["breaking"])),
+            "healed_events_gt": heal["gt_recovered_events"] if heal else None,
             "healing_success_rate": heal["success_rate_gt"] if heal else None,
+            "healing_success_all_breaking": heal["success_rate_gt_all_breaking"] if heal else None,
             "field_recovery_rate": heal["field_recovery_rate"] if heal else None,
             "ttr_median_s": M.describe([e["ttr_excl_wait_ms"] / 1000 for e in events])["median"],
             "regeneration_latency_median_s": M.describe(
@@ -600,7 +611,9 @@ def build(exp) -> dict:
             "planned_repetitions": ecfg.get("planned_repetitions"),
             "render_modes": dict(render_modes),
             "baseline_labels_by_source": data.get("gt_sources", {}),
-            "unscored_decisions": sum(1 for r in data["records"] if not r["has_gt"]),
+            "unscored_decisions": sum(1 for r in data["records"] if not r["has_gt"]
+                                      and r["phase"] == RecordPhase.FINAL and (r["rep"] or 0) >= 1),
+            "sites_evaluated": len({r["site"] for r in data["runs"].values() if r["rep"]}),
             "runs": len(data["runs"]),
             "records": len(data["records"]),
             "change_events": len(data["events"]),
@@ -895,8 +908,9 @@ def render_markdown(rep: dict) -> str:
     L.append("- Field decision: one field in one run. TP = extracted and equal to the label after "
              "normalisation; a wrong value counts as FP and FN; a missing value as FN; any value for "
              "a field labelled absent as FP. List fields use item-level multiset matching.")
-    L.append("- Degraded run: at least one field is wrong before healing (whenever it broke). "
-             "Ground truth for failure alarms.")
+    L.append("- Degraded run: a field the module extracted correctly from the original page (t0) "
+             "is wrong before healing at this step (whenever it broke). Ground truth for failure "
+             "alarms; fields already wrong at t0 are extraction errors and are not counted.")
     L.append("- Breaking change: a field correct at the previous step is wrong at this step before "
              "healing (per condition). Change detection (RQ1) is scored only on runs that started "
              "with every field correct, so persistent earlier failures cannot inflate it.")

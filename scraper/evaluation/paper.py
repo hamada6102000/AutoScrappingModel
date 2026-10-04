@@ -29,7 +29,9 @@ def scope_sentence(rep) -> str:
     planned = c.get("planned_repetitions")
     reps = c.get("repetitions_completed")
     mods = ", ".join(COND_INFO[x]["label"] for x in run) or "no module"
-    s = (f"The results below cover {c['sites']} website(s) with {c.get('fields', 'n/a')} target fields, "
+    evaluated = c.get("sites_evaluated", c["sites"])
+    s = (f"The results below cover {evaluated} of the {c['sites']} configured website(s) "
+         f"({c.get('fields', 'n/a')} target fields configured), "
          f"{reps} repetition(s) of the change sequence"
          + (f" ({planned} were planned)" if planned and planned != reps else "")
          + f", and the following module(s): {mods}. ")
@@ -104,15 +106,19 @@ def results_markdown(rep: dict) -> str:
     if not heal_mods:
         L.append("No self-healing module has been run yet.")
     for m in heal_mods:
-        L.append(f"- {m['module']}: {m['breaking_events']} breaking changes; GT-verified healing success "
-                 f"{_p(m['healing_success_rate'])}; field-level recovery {_p(m['field_recovery_rate'])}; "
-                 f"median time-to-recovery {_n(m['ttr_median_s'])} s; median regeneration latency "
-                 f"{_n(m['regeneration_latency_median_s'])} s.")
+        L.append(f"- {m['module']}: {m['breaking_events']} breaking changes (a field correct at the "
+                 f"previous step became wrong), {m['detected_breaking_events']} of them detected by the "
+                 f"health monitor; {m['healed_events_gt']} detected events fully repaired (GT-verified "
+                 f"success {_p(m['healing_success_rate'])} of detected, "
+                 f"{_p(m['healing_success_all_breaking'])} of all breaking changes); field-level recovery "
+                 f"{_p(m['field_recovery_rate'])}; median time-to-recovery {_n(m['ttr_median_s'])} s; "
+                 f"median regeneration latency {_n(m['regeneration_latency_median_s'])} s.")
     L += ["", "## D. Failure detection", ""]
     for m in mods:
-        L.append(f"- {m['module']}: degraded monitoring runs {_p(m['degraded_run_share'])}; alarm false-positive "
-                 f"rate {_p(m['alarm_false_positive_rate'])}; silent failures (wrong value, no alarm) "
-                 f"{m['silent_failures'] if m['silent_failures'] is not None else 'n/a'}.")
+        L.append(f"- {m['module']}: degraded monitoring runs {_p(m['degraded_run_share'])} (a field correct "
+                 f"at t0 wrong before healing); alarm false-positive rate {_p(m['alarm_false_positive_rate'])}; "
+                 f"change-detection recall {_p(m['change_detection_recall'])}; silent failures (degraded, "
+                 f"no alarm) {m['silent_failures'] if m['silent_failures'] is not None else 'n/a'}.")
     tk = rep.get("tokens") or {}
     if tk.get("sites"):
         L += ["", "## E. Pruning", ""]

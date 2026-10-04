@@ -121,6 +121,47 @@ def verify(exp, results_dir: Path | None = None) -> dict:
               f"F1={_f(m.get('overall_f1'))} Acc={_f(m.get('overall_accuracy'))}")
     out["recomputed"] = agg
 
+    # 2b: breaking changes, detection and GT-verified healing, recounted
+    correct = {}   # (run_id, field, phase) -> bool
+    runs = {}
+    for rec in (ExtractedRecord.objects.filter(run__experiment=exp, run__completed=True,
+                                               run__repetition__gte=1).select_related("field", "run")):
+        gt = gts.get((rec.run.snapshot_id, rec.field.name))
+        d = _decision(rec, gt, thr)
+        if d is None:
+            continue
+        correct[(rec.run_id, rec.field.name, rec.phase)] = d[3]
+        runs[rec.run_id] = rec.run
+    chains = defaultdict(dict)
+    for run in runs.values():
+        chains[(run.condition, run.target.site_key, run.repetition)][run.step] = run
+    counts = defaultdict(lambda: [0, 0, 0])   # breaking, detected, healed (GT)
+    for (cond, _site, _rep), steps in chains.items():
+        for k, run in steps.items():
+            prev = steps.get(k - 1)
+            if not k or prev is None:
+                continue
+            fields = {f for (rid, f, _ph) in correct if rid in (run.id, prev.id)}
+            broken = [f for f in fields
+                      if correct.get((prev.id, f, RecordPhase.FINAL)) is True
+                      and correct.get((run.id, f, RecordPhase.PRE_HEAL),
+                                      correct.get((run.id, f, RecordPhase.FINAL))) is False]
+            if not broken:
+                continue
+            c = counts[cond]
+            c[0] += 1
+            if run.detected:
+                c[1] += 1
+                if all(correct.get((run.id, f, RecordPhase.FINAL)) is True for f in broken):
+                    c[2] += 1
+    for cond, (brk, det, healed) in counts.items():
+        m = mods.get(cond) or {}
+        same = (brk == m.get("breaking_events") and det == m.get("detected_breaking_events")
+                and (m.get("healed_events_gt") is None or healed == m.get("healed_events_gt")))
+        check(f"breaking / detected / healed counts for {cond} equal the report", same,
+              f"recounted {brk}/{det}/{healed}; report {m.get('breaking_events')}/"
+              f"{m.get('detected_breaking_events')}/{m.get('healed_events_gt')}")
+
     # 3: determinism of the report
     rep2 = report_mod.build(exp)
     rep2.pop("_data", None)
