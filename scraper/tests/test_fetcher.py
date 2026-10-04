@@ -112,3 +112,28 @@ class MarkerAndSanitisingTests(SimpleTestCase):
         page = prune(html, structured=True)
         self.assertIn('<div data-key="name">ABC</div>', page.clean_html)
         self.assertIn('data-key="key"', page.clean_html)
+
+
+class LabelValueRunTests(SimpleTestCase):
+    """Spec tables / quote statistics are kept whole in the LLM view."""
+
+    def test_key_value_rows_are_not_collapsed(self):
+        rows = "".join(f"<tr><th>Label {i}</th><td>value {i}</td></tr>" for i in range(7))
+        page = prune(f"<html><body><main><table>{rows}</table></main></body></html>")
+        self.assertEqual(page.llm_view.count("<tr>"), 7)
+        self.assertNotIn("omitted", page.llm_view)
+
+    def test_record_lists_are_still_collapsed(self):
+        cards = "".join(f'<div class="card"><h3>Product {i}</h3><span class="p">${i}.00</span>'
+                        f'<a href="/p/{i}">view</a></div>' for i in range(10))
+        page = prune(f"<html><body><main>{cards}</main></body></html>")
+        self.assertIn("+7 more similar", page.llm_view)
+        repeated = "".join(f"<tr><td>Binance</td><td>BTC/USDT</td><td>{i}</td></tr>" for i in range(9))
+        page = prune(f"<html><body><main><table>{repeated}</table></main></body></html>")
+        self.assertIn("+6 more similar", page.llm_view)
+
+    def test_quote_statistics_list_is_kept(self):
+        items = "".join(f'<li><span class="label">Stat {i}</span><span class="value">{i}.5</span></li>'
+                        for i in range(16))
+        page = prune(f"<html><body><main><ul>{items}</ul></main></body></html>")
+        self.assertEqual(page.llm_view.count('class="label"'), 16)

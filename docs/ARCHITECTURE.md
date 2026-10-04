@@ -66,7 +66,10 @@ deterministic views:
   only there can be addressed by XPath.
 - **LLM view** (what the model reads): the clean DOM with text truncated to 200
   characters, attribute values to 80, and runs of ≥ 6 near-identical siblings
-  collapsed to the first 3 plus a marker comment. Tags and kept attributes are
+  (records such as product cards or market rows) collapsed to the first 3 plus
+  a marker comment. Runs of label/value rows (a spec table, quote statistics:
+  two cells, the first a short non-link label, distinct labels) are never
+  collapsed, because every row is a different field. Tags and kept attributes are
   identical, so selectors written on the view work on the clean DOM.
 
 Token counts (tiktoken `cl100k_base`) are recorded for the raw page, the clean

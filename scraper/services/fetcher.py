@@ -85,6 +85,8 @@ TEXT_LIMIT = 200
 ATTR_LIMIT = 80
 RUN_KEEP = 3
 RUN_MIN = 6
+LABEL_MAX = 60   # a label cell ("Price (incl. tax)", "Market Cap") is short
+_NOT_LABEL = {"a", "img", "h1", "h2", "h3", "h4", "h5", "h6"}
 
 BLOCK_MARKERS = re.compile(
     r"captcha|are you a robot|access denied|unusual traffic|"
@@ -469,6 +471,36 @@ def _marker_text(n: int, sig: tuple) -> str:
     return xml_safe(text)
 
 
+def _label_value_pair(el) -> bool:
+    """A row holding one labelled value: two element children, the first a
+    short label (<tr><th>Tax</th><td>£0.00</td></tr>, <li><span>Open</span>
+    <span>333.20</span></li>)."""
+    cells = [c for c in el if isinstance(c.tag, str)]
+    if len(cells) != 2:
+        return False
+    # A record's first cell is usually its linked title or image (product
+    # cards, search results): those are not labels.
+    first = cells[0]
+    if first.tag in _NOT_LABEL or any(isinstance(d.tag, str) and d.tag in _NOT_LABEL
+                                       for d in first.iterdescendants()):
+        return False
+    label = _WS.sub(" ", first.text_content() or "").strip()
+    value = _WS.sub(" ", cells[1].text_content() or "").strip()
+    return 0 < len(label) <= LABEL_MAX and bool(value) and label != value
+
+
+def _label_value_run(run) -> bool:
+    """Rows of a key/value block (a spec table, quote statistics) look alike
+    but each carries a different field, so they are never collapsed. Lists of
+    records (product cards, search results, market rows) still are."""
+    pairs = [el for el in run if _label_value_pair(el)]
+    if len(pairs) < 0.8 * len(run):
+        return False
+    labels = {_WS.sub(" ", el[0].text_content() or "").strip().lower() for el in pairs
+              if isinstance(el[0].tag, str)}
+    return len(labels) >= 0.8 * len(pairs)
+
+
 def _llm_view(clean_root) -> str:
     root = copy.deepcopy(clean_root)
     for el in root.iter():
@@ -492,7 +524,7 @@ def _llm_view(clean_root) -> str:
             while j + 1 < len(children) and _signature(children[j + 1]) == sig:
                 j += 1
             run = children[i : j + 1]
-            if len(run) >= RUN_MIN:
+            if len(run) >= RUN_MIN and not _label_value_run(run):
                 hidden = run[RUN_KEEP:]
                 marker = etree.Comment(_marker_text(len(hidden), sig))
                 run[RUN_KEEP - 1].addnext(marker)
