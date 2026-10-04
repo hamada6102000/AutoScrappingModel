@@ -45,6 +45,21 @@ def _pct_axis(ax):
     ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
 
 
+def _legend_top(ax):
+    """Legend in the band above the plot, right-aligned (never over data)."""
+    ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncols=4, fontsize=8, borderaxespad=0.2)
+
+
+def _spread(ys: list[float], gap: float) -> list[float]:
+    """Nudge label positions apart so end labels never overlap."""
+    order = sorted(range(len(ys)), key=lambda i: ys[i])
+    out = list(ys)
+    for a, b in zip(order, order[1:]):
+        if out[b] - out[a] < gap:
+            out[b] = out[a] + gap
+    return out
+
+
 def _short(cond: str) -> str:
     return COND_INFO[cond]["short"]
 
@@ -70,7 +85,7 @@ def module_f1(plt, rep, path: Path) -> Path | None:
     _pct_axis(ax)
     ax.set_ylabel("Field-level F1")
     ax.set_title("Extraction F1 by module", loc="left")
-    ax.legend(loc="upper left", ncols=2, fontsize=8)
+    _legend_top(ax)
     fig.tight_layout()
     fig.savefig(path, dpi=300)
     plt.close(fig)
@@ -84,6 +99,7 @@ def f1_by_step(plt, rep, path: Path) -> Path | None:
         return None
     fig, ax = plt.subplots(figsize=(6.4, 3.2))
     steps = [r["step"] for r in rows]
+    ends = []
     for cond in conds:
         ys = [r.get(f"{cond}_f1") for r in rows]
         pts = [(s, y) for s, y in zip(steps, ys) if y is not None]
@@ -91,7 +107,12 @@ def f1_by_step(plt, rep, path: Path) -> Path | None:
             continue
         ax.plot([p[0] for p in pts], [p[1] for p in pts], color=MODULE_COLOR[cond], linewidth=2,
                 marker="o", markersize=4, label=_short(cond))
-        ax.annotate(_short(cond), pts[-1], xytext=(4, 0), textcoords="offset points",
+        ends.append((cond, pts[-1]))
+    lo_all = min((r.get(f"{c}_f1") for r in rows for c in conds if r.get(f"{c}_f1") is not None), default=0)
+    gap = max(0.03, (1.02 - max(0, lo_all - 0.05)) * 0.06)
+    placed = _spread([p[1] for _, p in ends], gap)
+    for (cond, (x, _y)), y in zip(ends, placed):
+        ax.annotate(f"{_short(cond)} {_y * 100:.1f}%", (x, y), xytext=(6, 0), textcoords="offset points",
                     va="center", fontsize=7, color=INK_2)
     ax.set_xticks(steps)
     ax.set_xlabel("Step (0 = original page; 1-8 = cumulative simulated changes)")
@@ -99,9 +120,9 @@ def f1_by_step(plt, rep, path: Path) -> Path | None:
     _pct_axis(ax)
     lo = min((r.get(f"{c}_f1") for r in rows for c in conds if r.get(f"{c}_f1") is not None), default=0)
     ax.set_ylim(max(0, lo - 0.05), 1.02)
-    ax.set_xlim(min(steps) - 0.3, max(steps) + 1.6)
+    ax.set_xlim(min(steps) - 0.3, max(steps) + 2.2)
     ax.set_title("F1 over the change sequence", loc="left")
-    ax.legend(loc="lower left", fontsize=8)
+    _legend_top(ax)
     fig.tight_layout()
     fig.savefig(path, dpi=300)
     plt.close(fig)
@@ -121,7 +142,7 @@ def healing_by_operator(plt, data, rep, path: Path) -> Path | None:
         return None
     ops = sorted(ops)
     fig, ax = plt.subplots(figsize=(6.4, 3.2))
-    width = 0.8 / len(conds)
+    width = min(0.35, 0.8 / len(conds))
     for i, cond in enumerate(conds):
         vals, ns = [], []
         for op in ops:
@@ -138,8 +159,8 @@ def healing_by_operator(plt, data, rep, path: Path) -> Path | None:
     ax.set_ylim(0, 1.12)
     _pct_axis(ax)
     ax.set_ylabel("GT-verified healing success")
-    ax.set_title("Healing success by change operator (detected breaking changes)", loc="left")
-    ax.legend(loc="upper right", fontsize=8)
+    ax.set_title("Healing success by change operator\n(detected breaking changes)", loc="left")
+    _legend_top(ax)
     fig.tight_layout()
     fig.savefig(path, dpi=300)
     plt.close(fig)
@@ -161,7 +182,7 @@ def token_reduction(plt, data, path: Path) -> Path | None:
     ax.set_xlabel("Site")
     ax.set_ylabel("Tokens (log scale)")
     ax.set_title("Page size before and after pruning", loc="left")
-    ax.legend(loc="upper left", ncols=2, fontsize=8)
+    _legend_top(ax)
     fig.tight_layout()
     fig.savefig(path, dpi=300)
     plt.close(fig)
