@@ -80,7 +80,7 @@ def scope_text(rep) -> str:
         t += (f". The values measured on {'this website' if len(repl['source_sites']) == 1 else 'these websites'} "
               f"were replicated to the remaining {n} websites: each of them is assigned the LLM-module values "
               f"measured on {_sites(repl['source_sites'])} (pooled over their field decisions), so the LLM rows "
-              f"over all {scope['configured_sites']} websites equal the measured "
+              f"over {len(repl['source_sites']) + n} websites equal the measured "
               f"{len(repl['source_sites'])}-website result. The replicated values are not measurements: no "
               "LLM call was made for those websites, and they are excluded from all statistical tests. "
               f"The rule-based modules were executed and measured on {len(scope['rule_sites'])} websites")

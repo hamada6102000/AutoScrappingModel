@@ -86,7 +86,7 @@ def _scoped(rep, cond: str, sep: str = " ") -> str:
     if m.get("sites_replicated"):
         if sep == "\n":
             return f"{_short(cond)}\n{m['sites_measured']} measured +\n{m['sites_replicated']} replicated sites"
-        return f"{_short(cond)} ({m['sites_measured']} measured + {m['sites_replicated']} replicated)"
+        return f"{_short(cond)} ({m['sites_measured']} meas. + {m['sites_replicated']} replicated)"
     n = m["sites"]
     return f"{_short(cond)}{sep}({n} site{'s' if n != 1 else ''})"
 
