@@ -6,9 +6,12 @@ Step 6 — run the evaluation protocol (resumable).
     python manage.py eval_run --max-llm-calls 200    # stop after a budget
     python manage.py eval_run --sites shop-a         # a subset
     python manage.py eval_run --natural              # natural-change chain (optional)
+    python manage.py eval_run --wait                 # keep going: sleep through rate limits
 """
 
 from __future__ import annotations
+
+import time
 
 from django.core.management.base import BaseCommand, CommandError
 
@@ -25,6 +28,11 @@ class Command(BaseCommand):
         parser.add_argument("--max-llm-calls", type=int, help="Stop after this many LLM calls.")
         parser.add_argument("--dry-run", action="store_true", help="Show the plan and estimate only.")
         parser.add_argument("--natural", action="store_true", help="Run the natural-change chain.")
+        parser.add_argument("--wait", action="store_true",
+                            help="When the LLM quota is exhausted, sleep until the provider's "
+                                 "suggested time and resume automatically.")
+        parser.add_argument("--max-hours", type=float, default=72.0,
+                            help="With --wait: give up after this many hours (default 72).")
 
     def handle(self, *args, **opts):
         exp = get_experiment(opts["experiment"])
@@ -42,22 +50,40 @@ class Command(BaseCommand):
                 no_severity = {"control", "perturb_numbers", "insert_banner"}
                 ops = " > ".join(s["op"] if s["op"] in no_severity else f"{s['op']}({s['severity']})"
                                  for s in plan)
-                self.stdout.write(f"  {row['site']:<20} view {row['llm_view_tokens']} tok, "
+                self.stdout.write(f"  {row['site']:<20} prompt {row['llm_view_tokens']} tok/call, "
                                   f"{row['calls_min']}-{row['calls_max']} calls; r1: {ops}")
             t = est["totals"]
             self.stdout.write(f"\nTotal: {t['calls_min']}-{t['calls_max']} LLM calls, "
                               f"~{t['tokens_min']:,}-{t['tokens_max']:,} tokens (upper bound).")
             return
 
-        try:
-            runner = EvaluationRunner(exp, write=self.stdout.write,
-                                      max_llm_calls=opts["max_llm_calls"], sites=sites)
-        except Exception as exc:
-            raise CommandError(f"Cannot start: {exc}") from exc
-        try:
-            stats = runner.run(natural=opts["natural"])
-        except EvalError as exc:
-            raise CommandError(str(exc)) from exc
+        deadline = time.time() + opts["max_hours"] * 3600
+        while True:
+            try:
+                runner = EvaluationRunner(exp, write=self.stdout.write,
+                                          max_llm_calls=opts["max_llm_calls"], sites=sites)
+            except Exception as exc:
+                raise CommandError(f"Cannot start: {exc}") from exc
+            try:
+                stats = runner.run(natural=opts["natural"])
+            except EvalError as exc:
+                raise CommandError(str(exc)) from exc
+            stopped = str(stats.get("stopped", ""))
+            quota = stopped.startswith("LLM quota")
+            transient = stopped.startswith("LLM provider error") and stats.get("retryable")
+            if not (opts["wait"] and (quota or transient)):
+                break
+            if quota:
+                delay = max(60.0, min(float(stats.get("retry_after") or 300) + 15, 3 * 3600))
+            else:
+                delay = 300.0
+            if time.time() + delay > deadline:
+                self.stdout.write(self.style.WARNING("--max-hours reached; stopping."))
+                break
+            self.stdout.write(self.style.WARNING(
+                f"{stats['stopped'][:200]}\nSleeping {int(delay)} s, then resuming... "
+                "(Ctrl+C is safe: completed runs are kept.)"))
+            time.sleep(delay)
 
         self.stdout.write(self.style.SUCCESS(
             f"\nDone this session: {stats['runs']} runs, {stats['llm_calls']} LLM calls "

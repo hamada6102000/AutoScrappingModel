@@ -27,7 +27,7 @@ import sys
 from django.conf import settings
 from django.db import transaction
 
-from ..llm.base import RateLimitExhausted
+from ..llm.base import ProviderUnavailable, RateLimitExhausted
 from ..llm.factory import get_provider
 from ..models import (
     ChangeType, Experiment, GroundTruth, GTSource, LLMCallLog, RulePurpose,
@@ -50,11 +50,31 @@ class EvalError(Exception):
 
 
 class QuotaStop(Exception):
-    pass
+    def __init__(self, message: str = "", retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def configure(exp) -> None:
+    """Apply experiment-wide settings that live outside the pipeline objects."""
+    from ..services.normalizer import set_date_order
+
+    set_date_order((exp.config.get("experiment") or {}).get("date_order") or "dmy")
+
+
+def input_cap(exp) -> int:
+    llm = exp.config["experiment"].get("llm") or {}
+    return int(llm.get("max_input_chars") or settings.SCRAPER.get("LLM_MAX_INPUT_CHARS", 60000))
 
 
 class BudgetStop(Exception):
     pass
+
+
+class ProviderStop(Exception):
+    def __init__(self, message: str = "", retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +118,7 @@ def ensure_target(exp, site: dict, condition: str, rep: int) -> ScrapeTarget:
             "name": f"{site['name']} [{condition} r{rep}]",
             "url": site["url"] or "http://local.invalid/",
             "category": site["category"],
-            "render": site["render"],
+            "render": site["render"] if site["render"] in ("static", "js") else "static",
             "html_file": site["html_file"],
             "prune_keep": site["prune_keep"],
             "is_active": False,  # never scraped live by run_scrape --all
@@ -149,6 +169,7 @@ def capture_snapshot(exp, site: dict, *, kind: str = SnapshotKind.BASELINE,
 
         raw, enc = decode_html(Path(site["html_file"]).read_bytes())
         status, meta = 200, {"source": "html_file", "path": site["html_file"], "encoding": enc}
+        meta["check"] = assess_page(raw, site, site["url"])
     else:
         if fetch_cfg.get("respect_robots", True):
             robots = robots_allowed(site["url"], ua, timeout)
@@ -157,22 +178,99 @@ def capture_snapshot(exp, site: dict, *, kind: str = SnapshotKind.BASELINE,
                     f"{site['key']}: robots.txt disallows {site['url']} for this user agent. "
                     "Save the page manually and set html_file, or document why you override it."
                 )
-        status, raw, meta = fetch_raw(site["url"], timeout, ua, site["render"])
-        if meta.get("error") or not raw:
-            raise EvalError(f"{site['key']}: fetch failed ({meta.get('error') or 'empty page'})")
+        status, raw, meta = _fetch_best(site, ua, timeout, exp, kind, label, write)
     snap = snapstore.create_snapshot(
         html=raw, site_key=site["key"], kind=kind, experiment=exp, url=site["url"],
         http_status=status, label=label, fetch_meta=meta, robots_allowed=robots,
         keep_tags=site["prune_keep"], label_view=True,
     )
+    check = meta.get("check") or {}
     if meta.get("suspected_block"):
         write(f"  WARNING {site['key']}: page looks like a bot-check/blocked page "
               f"(HTTP {status}). Open its labeling view; if so, save the page from your "
               "browser and use html_file.")
+    if check and not check.get("content_ok"):
+        write(f"  WARNING {site['key']}: none of the expected texts {site['expect_text']} is on "
+              "the saved page (consent wall, bot check or unrendered page?).")
     if snap.llm_view_truncated:
         write(f"  NOTE {site['key']}: LLM view ({snap.llm_view_tokens} tokens) exceeds "
               "LLM_MAX_INPUT_CHARS and will be truncated in prompts.")
     return snap
+
+
+def assess_page(raw: str, site: dict, url: str) -> dict:
+    """How much of the annotated dataset a fetched page contains: the expected
+    texts (content check) and the recorded field values found literally."""
+    from ..services.fetcher import prune
+    from .dataset import PageIndex, locate
+
+    page = prune(raw, site["prune_keep"])
+    idx = PageIndex(page.clean_html, url)
+    expect = site.get("expect_text") or []
+    expect_found = [t for t in expect if idx.where(t, "string")]
+    fields = list(site["fields"]) + list(site.get("excluded_fields") or [])
+    checkable = found = 0
+    for f in fields:
+        if not f.get("dataset_value"):
+            continue
+        loc = locate(f, idx)
+        if loc.status in ("not-literal", "boolean"):
+            continue
+        checkable += 1
+        found += loc.status != "not-found"
+    return {
+        "content_ok": bool(expect_found) or not expect,
+        "expect_found": len(expect_found), "expect_total": len(expect),
+        "values_found": found, "values_checkable": checkable,
+        "clean_chars": page.clean_chars, "llm_view_tokens": page.llm_view_tokens,
+    }
+
+
+def _fetch_best(site, ua, timeout, exp, kind, label, write):
+    """Fetch with the site's render mode; with 'auto', fetch both the static
+    HTML and the browser-rendered page and keep the one that contains more of
+    the annotated values (the annotators read the rendered page). Every
+    candidate's check is stored in fetch_meta; rejected HTML is kept on disk."""
+    modes = ["static", "js"] if site["render"] == "auto" else [site["render"]]
+    candidates, errors = [], {}
+    for mode in modes:
+        status, raw, meta = fetch_raw(site["url"], timeout, ua, mode)
+        if meta.get("error") or not raw:
+            errors[mode] = meta.get("error") or "empty page"
+            continue
+        meta["check"] = assess_page(raw, site, meta.get("final_url") or site["url"])
+        candidates.append((mode, status, raw, meta))
+    if not candidates:
+        raise EvalError(f"{site['key']}: fetch failed ({'; '.join(f'{m}: {e}' for m, e in errors.items())})")
+
+    def score(c):
+        mode, status, _, meta = c
+        chk = meta["check"]
+        return (chk["content_ok"], not meta.get("suspected_block"), status < 400,
+                chk["values_found"], mode == "static")
+
+    candidates.sort(key=score, reverse=True)
+    mode, status, raw, meta = candidates[0]
+    meta["render_chosen"] = mode
+    meta["render_candidates"] = {
+        m: {"http_status": st, "suspected_block": bool(mt.get("suspected_block")), **mt["check"]}
+        for m, st, _, mt in candidates
+    }
+    if errors:
+        meta["render_errors"] = errors
+    for m, _, other_raw, _ in candidates[1:]:
+        snapstore.write_text(
+            snapstore._rel(exp, site["key"], f"{kind}_{snapstore.slug(label)}.rejected-{m}.html"),
+            other_raw,
+        )
+    if len(modes) > 1:
+        summary = ", ".join(
+            f"{m}: {v['values_found']}/{v['values_checkable']} values"
+            + ("" if v["content_ok"] else " (content check failed)")
+            for m, v in meta["render_candidates"].items())
+        write(f"  {site['key']}: render auto -> {mode} ({summary}"
+              + (f"; failed: {', '.join(errors)}" if errors else "") + ")")
+    return status, raw, meta
 
 
 def baseline_snapshot(exp, site_key: str):
@@ -223,7 +321,10 @@ class EvaluationRunner:
         self.calls_made = 0
         self.site_keys = sites or [s["key"] for s in self.cfg["sites"]]
         llm = self.ecfg["llm"]
+        configure(exp)
         self.provider = provider or get_provider(llm["provider"], llm.get("model"))
+        if llm.get("max_input_chars") and hasattr(self.provider, "max_input_chars"):
+            self.provider.max_input_chars = int(llm["max_input_chars"])
         common = dict(
             provider=self.provider,
             allow_fallback=False,          # never mix heuristic into LLM results
@@ -254,8 +355,12 @@ class EvaluationRunner:
                         self.run_site_rep(site, rep)
         except QuotaStop as exc:
             self.stats["stopped"] = f"LLM quota exhausted: {exc}"
+            self.stats["retry_after"] = exc.retry_after
         except BudgetStop as exc:
             self.stats["stopped"] = str(exc)
+        except ProviderStop as exc:
+            self.stats["stopped"] = f"LLM provider error: {exc}"
+            self.stats["retryable"] = exc.retryable
         return self.stats
 
     def readiness(self) -> list[str]:
@@ -359,7 +464,9 @@ class EvaluationRunner:
         for g in gt_rows:
             new_value = result.gt_updates.get(g.field_name)
             notes = ""
-            if preserved.get(g.field_name) is False:
+            if (g.notes or "").startswith("exclude"):
+                notes = g.notes  # excluded at the parent stays excluded
+            elif preserved.get(g.field_name) is False:
                 notes = "exclude: text not preserved by mutation"
             GroundTruth.objects.create(
                 snapshot=snap, field_name=g.field_name, cardinality=g.cardinality,
@@ -386,7 +493,9 @@ class EvaluationRunner:
             with transaction.atomic():
                 run = self.pipelines[target.condition].run(target, snapshot=snapshot, context=ctx)
         except RateLimitExhausted as exc:
-            raise QuotaStop(str(exc)) from exc
+            raise QuotaStop(str(exc), getattr(exc, "retry_after", None)) from exc
+        except ProviderUnavailable as exc:
+            raise ProviderStop(str(exc), exc.retryable) from exc
         self.calls_made += run.llm_calls_count
         self.stats["runs"] += 1
         self.stats["llm_calls"] += run.llm_calls_count
@@ -408,13 +517,26 @@ def estimate(exp: Experiment) -> dict:
     reps, attempts = ecfg["repetitions"], ecfg["max_heal_attempts"]
     structural = sum(1 for s in ecfg["protocol"]["steps"] if family(s["op"]) == "structural")
     rows, totals = [], {"calls_min": 0, "calls_max": 0, "tokens_min": 0, "tokens_max": 0}
+    from ..llm.base import FieldSpec
+    from ..llm.prompts import SYSTEM_PROMPT, build_prompt
+    from ..services import tokens as tok
+
+    cap = input_cap(exp)
     for site in exp.config["sites"]:
         snap = baseline_snapshot(exp, site["key"])
-        view = snap.llm_view_tokens if snap and snap.llm_view_tokens else None
+        view = None
+        if snap is not None:
+            page = snapstore.pruned_page(snap, site["prune_keep"])
+            specs = [FieldSpec(f["name"], f["description"], f["type"], f["cardinality"])
+                     for f in site["fields"]]
+            prompt, _ = build_prompt(page.llm_view, specs, max_html_chars=cap)
+            view = tok.count_tokens(SYSTEM_PROMPT + prompt)
         calls_min = reps
         calls_max = reps * ((1 + attempts) + structural * attempts)
-        per_call = (view or 0) + 700  # prompt instructions + response
-        row = {"site": site["key"], "llm_view_tokens": view, "calls_min": calls_min,
+        # actual prompt (capped HTML + field list) + room for one XPath per field
+        per_call = (view or 0) + 70 * len(site["fields"])
+        row = {"site": site["key"], "llm_view_tokens": view, "per_call_tokens": per_call if view else None,
+               "calls_min": calls_min,
                "calls_max": calls_max,
                "tokens_min": calls_min * per_call if view else None,
                "tokens_max": calls_max * per_call if view else None}

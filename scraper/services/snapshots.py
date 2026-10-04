@@ -23,7 +23,7 @@ from django.utils import timezone
 
 from ..models import GroundTruth, Snapshot, SnapshotKind
 from .fetcher import PrunedPage, prune
-from .htmlutil import parse_html, visible_text
+from .htmlutil import parse_html, searchable_text
 from .matching import value_in_text
 
 _CACHE_SIZE = 32
@@ -170,9 +170,10 @@ def compute_field_presence(snapshot: Snapshot, keep_tags=(), field_types=None) -
     field_types = field_types or {}
     raw = read_html(snapshot)
     page = pruned_page(snapshot, keep_tags)
-    raw_text = visible_text(parse_html(raw))
-    clean_text = visible_text(parse_html(page.clean_html))
-    view_text = visible_text(parse_html(page.llm_view))
+    base = snapshot.url or None
+    raw_text = searchable_text(parse_html(raw), base)
+    clean_text = searchable_text(parse_html(page.clean_html), base)
+    view_text = searchable_text(parse_html(page.llm_view), base)
     presence = {}
     for gt in snapshot.ground_truth.all():
         ftype = field_types.get(gt.field_name, "string")
@@ -183,9 +184,12 @@ def compute_field_presence(snapshot: Snapshot, keep_tags=(), field_types=None) -
         # For lists the LLM view intentionally shows only the first few items
         # of a long run, so "visible" means at least one item is shown.
         view_check = any if gt.cardinality == "many" else all
+        need = any if gt.alternatives else all   # alternatives: one form is enough
+        if gt.alternatives:
+            view_check = any
         presence[gt.field_name] = {
-            "in_raw": all(value_in_text(v, raw_text, ftype) for v in values),
-            "in_clean_dom": all(value_in_text(v, clean_text, ftype) for v in values),
+            "in_raw": need(value_in_text(v, raw_text, ftype) for v in values),
+            "in_clean_dom": need(value_in_text(v, clean_text, ftype) for v in values),
             "in_llm_view": view_check(value_in_text(v, view_text, ftype) for v in values),
         }
     snapshot.field_presence = presence

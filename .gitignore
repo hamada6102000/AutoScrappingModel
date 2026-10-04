@@ -21,8 +21,9 @@ media/
 demo_state.txt
 # Snapshots, labels, results (large; export them with export_results instead)
 eval_data/
-# Your real site list stays local unless you choose to commit it
+# Your real site list and annotated dataset stay local unless you choose to commit them
 eval/sites.yaml
+eval/dataset/
 
 # Secrets / local config
 .env

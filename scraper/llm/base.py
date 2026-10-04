@@ -22,12 +22,28 @@ class LLMError(Exception):
     """A provider call failed (network, HTTP error, bad response)."""
 
 
+class ProviderUnavailable(LLMError):
+    """The LLM could not be called at all (network, server error, bad key,
+    prompt too large). In the evaluation this is an infrastructure stop — the
+    run is rolled back — never a method failure. ``retryable`` tells whether
+    waiting may help (network / 5xx) or a fix is needed (4xx, too large)."""
+
+    def __init__(self, message: str = "", retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class RateLimitExhausted(LLMError):
     """Rate limit / quota still exceeded after the allowed waiting time.
 
     The evaluation harness treats this as an infrastructure stop (roll the run
-    back and resume later), never as a method failure.
+    back and resume later), never as a method failure. ``retry_after`` is the
+    provider's suggested wait in seconds, when it gave one.
     """
+
+    def __init__(self, message: str = "", retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class RequestTooLarge(LLMError):

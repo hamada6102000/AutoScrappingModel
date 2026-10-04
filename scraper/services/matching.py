@@ -20,7 +20,7 @@ import unicodedata
 from collections import Counter
 from decimal import Decimal, InvalidOperation
 
-from .normalizer import clean_text, normalize, parse_number
+from .normalizer import canonical_url, clean_text, normalize, parse_number
 
 _TOKEN = re.compile(r"\w+", re.UNICODE)
 
@@ -39,7 +39,7 @@ def canonical(value: str, field_type: str = "string") -> str:
             except InvalidOperation:
                 pass
     if field_type == "url":
-        return v.strip().rstrip("/").lower()
+        return canonical_url(v)
     return _text(v)
 
 

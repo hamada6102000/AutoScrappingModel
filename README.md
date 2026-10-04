@@ -162,10 +162,11 @@ scraper/                Core app (Models + services + LLM providers)
     pipeline.py         closed-loop orchestrator
   evaluation/           20-site evaluation harness (config, protocol, ground-truth
                         sheets, metrics, report, export, external baselines)
-  management/commands/  seed_demo, run_scrape, simulate_change, eval_init,
-                        eval_snapshot, eval_gt_template, eval_gt_import, eval_check,
-                        eval_run, eval_report, eval_import_predictions, export_results
-  tests/                Unit + integration tests (84)
+  management/commands/  seed_demo, run_scrape, simulate_change, eval_import_dataset,
+                        eval_init, eval_snapshot, eval_audit, eval_gt_template,
+                        eval_gt_import, eval_check, eval_run, eval_report,
+                        eval_import_predictions, export_results
+  tests/                Unit + integration tests (94)
 dashboard/              Web UI (Controllers + Templates) — the "V" + "C" of MVC
 demopages/              Self-contained demo product page (v1 / v2 fixtures)
 eval/sites.example.yaml Template for your evaluation sites
@@ -199,9 +200,10 @@ metric in Table 5.1 and RQ1–RQ5 from stored runs. Nothing is estimated. Full
 runbook: **[docs/EVALUATION.md](docs/EVALUATION.md)**.
 
 ```bat
-copy eval\sites.example.yaml eval\sites.yaml     &  rem list your 20 pages
+python manage.py eval_import_dataset --dataset eval\dataset\dataset_20_sites.json
 python manage.py eval_init --config eval\sites.yaml
 python manage.py eval_snapshot                    &  rem save every page
+python manage.py eval_audit                       &  rem check pages vs. dataset, pre-fill labels
 python manage.py eval_gt_template                 &  rem Excel sheet to label
 python manage.py eval_gt_import --file eval_data\ieee-2026\ground_truth_baseline.xlsx
 python manage.py eval_check --ping                &  rem readiness + key test

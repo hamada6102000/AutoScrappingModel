@@ -13,7 +13,8 @@ from pathlib import Path
 from ..services.mutations import ALL_OPS
 
 CATEGORIES = {"ecommerce", "news", "finance", "jobs", "academic", "other"}
-FIELD_TYPES = {"string", "number", "price", "date", "url", "mixed"}
+FIELD_TYPES = {"string", "number", "price", "date", "url", "mixed", "boolean"}
+RENDER_MODES = {"static", "js", "auto"}
 CARDINALITIES = {"single", "many"}
 CONDITIONS = {"self_healing", "static"}
 
@@ -36,14 +37,20 @@ DEFAULTS = {
     "max_heal_attempts": 3,
     "failure_memory_size": 10,
     "repetitions": 3,
+    # Repetitions in the study design, if more than were run (reported as planned).
+    "planned_repetitions": None,
     "seed": 20261004,
+    # How an ambiguous date like 10/12/2026 is read: dmy or mdy.
+    "date_order": "dmy",
     "conditions": ["self_healing", "static"],
     "protocol": {
         "steps": DEFAULT_STEPS,
         "severities": [0.3, 0.6, 1.0],
         "shuffle": True,
     },
-    "fetch": {"user_agent": None, "timeout": 30, "respect_robots": True},
+    # render: static (HTTP), js (Playwright) or auto (both; keep the version
+    # that contains more of the annotated values — see protocol.capture_snapshot).
+    "fetch": {"user_agent": None, "timeout": 30, "respect_robots": True, "render": "static"},
     # A list field counts as "correct" when its item-level F1 reaches this.
     "list_correct_f1": 0.9,
 }
@@ -94,6 +101,17 @@ def resolve(data: dict, base_dir: Path | None = None) -> dict:
     llm = exp.get("llm") or {}
     if llm.get("provider") not in {"heuristic", "groq", "anthropic", "openai", "ollama"}:
         problems.append(f"experiment.llm.provider {llm.get('provider')!r} is not supported")
+    if llm.get("max_input_chars") is not None and (
+            not isinstance(llm["max_input_chars"], int) or llm["max_input_chars"] < 2000):
+        problems.append("experiment.llm.max_input_chars must be an integer >= 2000")
+    if exp.get("date_order") not in ("dmy", "mdy"):
+        problems.append("experiment.date_order must be dmy or mdy")
+    planned = exp.get("planned_repetitions")
+    if planned is not None and (not isinstance(planned, int) or planned < 1):
+        problems.append("experiment.planned_repetitions must be a positive integer")
+    default_render = str((exp.get("fetch") or {}).get("render") or "static").lower()
+    if default_render not in RENDER_MODES:
+        problems.append("experiment.fetch.render must be static, js or auto")
     for key, lo, hi in (("health_threshold", 0, 1), ("max_heal_attempts", 1, 10),
                         ("failure_memory_size", 0, 100), ("repetitions", 1, 20)):
         value = exp.get(key)
@@ -129,11 +147,15 @@ def resolve(data: dict, base_dir: Path | None = None) -> dict:
             "name": str(raw.get("name") or raw.get("key") or "").strip(),
             "url": str(raw.get("url") or "").strip(),
             "category": str(raw.get("category") or "other").strip().lower(),
-            "render": str(raw.get("render") or "static").strip().lower(),
+            "render": str(raw.get("render") or default_render).strip().lower(),
             "html_file": str(raw.get("html_file") or "").strip(),
             "prune_keep": [str(t).lower() for t in (raw.get("prune_keep") or [])],
             "notes": str(raw.get("notes") or ""),
+            "website": str(raw.get("website") or "").strip(),
+            "page_type": str(raw.get("page_type") or "").strip(),
+            "expect_text": [str(t) for t in (raw.get("expect_text") or []) if str(t).strip()],
             "fields": [],
+            "excluded_fields": [],
         }
         where = f"site '{site['key'] or i}'"
         if not _KEY.match(site["key"]):
@@ -147,8 +169,8 @@ def resolve(data: dict, base_dir: Path | None = None) -> dict:
             problems.append(f"{where}: url must start with http:// or https://")
         if site["category"] not in CATEGORIES:
             problems.append(f"{where}: category must be one of {', '.join(sorted(CATEGORIES))}")
-        if site["render"] not in ("static", "js"):
-            problems.append(f"{where}: render must be 'static' or 'js'")
+        if site["render"] not in RENDER_MODES:
+            problems.append(f"{where}: render must be 'static', 'js' or 'auto'")
         if site["html_file"]:
             p = Path(site["html_file"])
             p = p if p.is_absolute() else (base_dir / p)
@@ -167,6 +189,11 @@ def resolve(data: dict, base_dir: Path | None = None) -> dict:
                 "cardinality": str(f.get("cardinality") or "single").strip().lower(),
                 "required": bool(f.get("required", True)),
                 "description": str(f.get("description") or "").strip(),
+                # Provenance from the annotated dataset (not shown to the LLM).
+                "source": str(f.get("source") or "visible").strip().lower(),
+                "dynamic": bool(f.get("dynamic", False)),
+                "dataset_value": "" if f.get("dataset_value") is None else str(f.get("dataset_value")),
+                "dataset_type": str(f.get("dataset_type") or "").strip(),
             }
             if not re.match(r"^[a-z0-9][a-z0-9_-]{0,99}$", field["name"]):
                 problems.append(f"{where} field[{j}]: name must be lowercase letters/digits/-/_")
@@ -177,6 +204,14 @@ def resolve(data: dict, base_dir: Path | None = None) -> dict:
                 problems.append(f"{where} field {field['name']}: type must be one of {', '.join(sorted(FIELD_TYPES))}")
             if field["cardinality"] not in CARDINALITIES:
                 problems.append(f"{where} field {field['name']}: cardinality must be single or many")
+            if f.get("exclude"):
+                # Kept in the record (and the paper's field table) but never
+                # sent to the scraper or scored.
+                reason = str(f.get("exclude_reason") or "").strip()
+                if not reason:
+                    problems.append(f"{where} field {field['name']}: exclude needs an exclude_reason")
+                site["excluded_fields"].append({**field, "exclude_reason": reason})
+                continue
             site["fields"].append(field)
         if not site["fields"]:
             problems.append(f"{where}: list at least one field")

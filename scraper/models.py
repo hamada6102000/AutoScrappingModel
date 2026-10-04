@@ -335,7 +335,28 @@ class GroundTruth(models.Model):
                 return [str(v) for v in data if str(v).strip()]
             except (ValueError, TypeError):
                 return [v.strip() for v in self.value.split("||") if v.strip()]
+        alternatives = self.alternatives
+        if alternatives is not None:
+            return alternatives
         return [self.value] if self.value.strip() else []
+
+    @property
+    def alternatives(self) -> list[str] | None:
+        """For a single-value field labelled with several acceptable forms
+        (e.g. the same instant shown in two time zones): the list of forms,
+        stored as {"any": [...]}; otherwise None."""
+        if self.cardinality == Cardinality.MANY or not self.value.startswith('{"any"'):
+            return None
+        try:
+            data = json.loads(self.value)
+        except (ValueError, TypeError):
+            return None
+        return [str(v) for v in data.get("any", []) if str(v).strip()]
+
+    @property
+    def display_value(self) -> str:
+        vals = self.values
+        return " || ".join(vals) if (self.cardinality == Cardinality.MANY or self.alternatives) else self.value
 
 
 # ---------------------------------------------------------------------------

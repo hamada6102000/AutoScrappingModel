@@ -10,6 +10,49 @@ Commands are for **Windows Command Prompt**, run inside the project folder
 
 ---
 
+## 0. Quick path for the annotated 20-site dataset
+
+Your dataset (`eval\dataset\dataset_20_sites.json`, with the same content as
+`sites.csv` + `fields.csv` and the workbook) is converted to the config
+without changing any URL, category or field:
+
+```bat
+python manage.py eval_import_dataset --dataset eval\dataset\dataset_20_sites.json --force
+python manage.py eval_init --config eval\sites.yaml
+python manage.py eval_snapshot
+python manage.py eval_audit
+```
+
+- `eval_import_dataset` maps types (text->string, other->mixed; number, price,
+  date, url and boolean unchanged), Single/List -> single/many and
+  Yes/No -> required. The recorded value, source, dynamic flag and original
+  type stay on every field for the record; the LLM only sees the name, type,
+  cardinality and description.
+- `eval_snapshot` uses `render: auto`: it saves both the plain HTML and the
+  page rendered by a headless browser and keeps the one that contains more of
+  your recorded values (the losing version is kept on disk as
+  `*.rejected-<mode>.html`). It warns when none of a site's expected texts
+  (e.g. its title) is on the page — a consent wall, bot check or empty shell.
+- `eval_audit` (no LLM calls) writes `eval_data\ieee-2026\audit\`:
+  `audit.md` (per site: render mode, robots.txt, content check, prompt size;
+  per field: whether your recorded value is on the saved page, where — visible
+  text, an attribute, or only the meta tags / JSON-LD block — and whether it is
+  inside the LLM prompt) and **`ground_truth_prefilled.xlsx`**: labels
+  pre-filled only where your recorded value is literally on the saved page
+  (abridged texts/lists completed from the page element that holds them, and
+  marked as such). Empty rows are the ones you must label. Review it and import
+  it as in Step 3.
+
+Snapshot pages **as soon as possible after annotation**: dynamic values
+(prices, quotes, rates) and job postings change or disappear.
+
+**Structured metadata.** Several dataset fields live only in JSON-LD, `<meta>`
+tags or the canonical URL, which the cleaner removes with `<head>` and
+`<script>`. With `SCRAPER_STRUCTURED_DATA=true` (default) they are re-inserted
+as `<section id="page-metadata">` (JSON-LD as nested `div[@data-key]`), so an
+XPath can address them. The simulated layout changes do not touch this block,
+so the report also gives accuracy split by where values were read from.
+
 ## 1. What the evaluation does
 
 For each site and each repetition (3 by default):
@@ -50,6 +93,7 @@ cd C:\Users\hm245\Downloads\AutoScrappingModel\AutoScrappingModel
 python -m venv venv
 venv\Scripts\activate
 python -m pip install -r requirements.txt
+python -m playwright install chromium
 copy .env.example .env
 notepad .env
 ```
@@ -100,8 +144,9 @@ without scripts). Act on any warning:
   `eval\saved_pages\`, then add `html_file: saved_pages/<name>.html` to that
   site and re-run: `python manage.py eval_snapshot --sites <key> --refresh`
 - **Content missing because it loads with JavaScript**: either save the page
-  from the browser as above, or add `render: js` and install Playwright
-  (`pip install playwright` then `python -m playwright install chromium`).
+  from the browser as above, or set `render: js` (or `auto`) for that site.
+  Playwright is in requirements.txt; run `python -m playwright install chromium`
+  once.
 - **robots.txt disallows the page**: the page is not fetched. Use a different
   page, or save it manually and state this in the paper's ethics section.
 
@@ -165,6 +210,9 @@ Useful options:
 
 - `--max-llm-calls 300` — stop after a budget (for example, to stay within a
   daily quota);
+- `--wait` — when the quota is exhausted, sleep until Groq says the limit
+  resets and continue automatically (leave the window open; `--max-hours`
+  bounds it);
 - `--sites shop-a,news-a` — run a subset.
 
 ### Step 6 — report and export

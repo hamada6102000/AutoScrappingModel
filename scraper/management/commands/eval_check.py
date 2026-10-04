@@ -86,6 +86,13 @@ class Command(BaseCommand):
                     self.stdout.write(self.style.SUCCESS(
                         f"\nLLM ping OK: {res.model}, {ms} ms, {res.prompt_tokens}+{res.completion_tokens} "
                         f"tokens, returned {res.xpaths['title']!r}"))
+                    limits = getattr(provider, "last_rate_limits", {}) or {}
+                    if limits:
+                        self.stdout.write("Provider rate limits reported for this key/model:")
+                        for k, v in sorted(limits.items()):
+                            self.stdout.write(f"  {k}: {v}")
+                        self.stdout.write("  (requests = per day, tokens = per minute on Groq; the daily "
+                                          "token limit is shown at console.groq.com/settings/limits)")
                 else:
                     problems.append(f"LLM ping returned no XPath (raw: {res.raw_response[:120]!r})")
             except Exception as exc:

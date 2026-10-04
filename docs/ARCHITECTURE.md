@@ -57,7 +57,13 @@ deterministic views:
   are unwrapped (prices often sit inside them). Body microdata
   (`<meta itemprop=…>`) is kept. Attributes are reduced to a whitelist, empty
   nodes and attribute-less single-child wrappers are removed, and whitespace is
-  collapsed. Per site, `prune_keep` can retain any container.
+  collapsed. Per site, `prune_keep` can retain any container. Empty rating
+  widgets whose class carries the value (`star-rating Three`) are kept.
+  With `STRUCTURED_DATA` on (default), the document `<title>`, `<meta>` tags,
+  the canonical link and every JSON-LD block are re-inserted at the top of
+  `<body>` as `<section id="page-metadata">` (JSON-LD as nested
+  `div[@data-key]` elements, numbers kept as written), so fields that exist
+  only there can be addressed by XPath.
 - **LLM view** (what the model reads): the clean DOM with text truncated to 200
   characters, attribute values to 80, and runs of ≥ 6 near-identical siblings
   collapsed to the first 3 plus a marker comment. Tags and kept attributes are

@@ -310,18 +310,26 @@ def op_perturb_numbers(root, rng, gt_fields: dict, notes: list) -> tuple[int, di
         if new == old:
             continue
         hits = 0
+        # Whole-number matches only: "22" must not hit "2022" or "22.5".
+        rx = re.compile(r"(?<![\d.,])" + re.escape(old) + r"(?![\d]|[.,]\d)")
+        plain_old, plain_new = old.replace(",", ""), new.replace(",", "")
+        rx_plain = re.compile(r"(?<![\d.,])" + re.escape(plain_old) + r"(?![\d]|[.,]\d)")
         for el in root.iter():
             if not isinstance(el.tag, str):
                 continue
-            if el.text and old in el.text:
-                el.text = el.text.replace(old, new)
+            # Text nodes, including JSON-LD script text, so structured copies
+            # of the value stay consistent with the visible one.
+            if el.text and rx.search(el.text):
+                el.text = rx.sub(new, el.text)
                 hits += 1
-            if el.tail and old in el.tail:
-                el.tail = el.tail.replace(old, new)
+            if el.text and plain_old != old and el.tag == "script" and rx_plain.search(el.text):
+                el.text = rx_plain.sub(plain_new, el.text)
+            if el.tail and rx.search(el.tail):
+                el.tail = rx.sub(new, el.tail)
                 hits += 1
             for attr in ("content", "data-price", "data-value", "value"):
-                if el.get(attr) and old.replace(",", "") in el.get(attr):
-                    el.set(attr, el.get(attr).replace(old.replace(",", ""), new.replace(",", "")))
+                if el.get(attr) and rx_plain.search(el.get(attr)):
+                    el.set(attr, rx_plain.sub(plain_new, el.get(attr)))
         if hits:
             updates[name] = raw.replace(old, new, 1)
             changed += hits
@@ -384,7 +392,21 @@ def apply_mutation(html: str, op: str, seed: int, severity: float = 0.5,
 
     gt_updates = {}
     if op == "perturb_numbers":
+        before_text = visible_text(root)
         affected, gt_updates = op_perturb_numbers(root, rng, gt_fields, notes)
+        # A changed number may also occur inside another field's value; such
+        # fields are flagged so their (now stale) label is not scored.
+        after_text = visible_text(root)
+        preserved = {}
+        for name, (values, ftype) in gt_fields.items():
+            if name in gt_updates:
+                continue
+            was = [v for v in values if value_in_text(v, before_text, ftype)]
+            preserved[name] = all(value_in_text(v, after_text, ftype) for v in was)
+        spec["gt_preserved"] = preserved
+        lost = [n for n, ok in preserved.items() if not ok]
+        if lost:
+            notes.append("other labelled values changed by the perturbation: " + ", ".join(lost))
     else:
         nodes = field_nodes(root, gt_fields) if gt_fields else []
         spec["field_nodes"] = len(nodes)

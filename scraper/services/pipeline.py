@@ -17,6 +17,7 @@ and a ground-truth comparison of every extracted value.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,7 +25,10 @@ from pathlib import Path
 from django.conf import settings
 from django.utils import timezone
 
-from ..llm.base import FailureHint, FieldSpec, LLMProvider, LLMResult, RateLimitExhausted
+from ..llm.base import (
+    FailureHint, FieldSpec, LLMProvider, LLMResult, ProviderUnavailable, RateLimitExhausted,
+    RequestTooLarge,
+)
 from ..llm.factory import get_provider_safe
 from ..llm.heuristic import HeuristicProvider
 from ..llm.prompts import PROMPT_VERSION
@@ -35,7 +39,7 @@ from ..models import (
 )
 from . import snapshots as snapstore
 from .change_detector import detect_change
-from .extractor import FieldOutcome, extract_one
+from .extractor import FieldOutcome, extract_one, set_base_url
 from .fetcher import FetchResult, fetch, profile_signature, prune_result
 from .health_monitor import compute_health
 from .htmlutil import decode_html, parse_html
@@ -128,6 +132,7 @@ class ScrapePipeline:
             run.dom_profile = {"tag": fr.page.tag_profile, "markup": fr.page.markup_profile}
         self._page = fr.page
         self._tree = parse_html(fr.page.clean_html)
+        set_base_url(self._tree, fr.url or target.url)
 
         if fr.error or fr.page.empty or self._tree is None:
             run.status = RunStatus.FAILED
@@ -323,6 +328,12 @@ class ScrapePipeline:
                 raise
             error = f"RateLimitExhausted: {exc}"[:300]
         except Exception as exc:  # network, HTTP, parsing, bad key
+            if self.raise_on_quota:
+                # Evaluation mode: the provider being unreachable is not a
+                # property of the method; stop and roll the run back.
+                fatal = isinstance(exc, RequestTooLarge) or re.search(r"HTTP 4\d\d", str(exc))
+                raise ProviderUnavailable(f"{type(exc).__name__}: {exc}"[:400],
+                                          retryable=not fatal) from exc
             error = f"{type(exc).__name__}: {exc}"[:300]
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
@@ -479,7 +490,7 @@ class ScrapePipeline:
             )
             gt = self._gt.get(f.name)
             if gt is not None:
-                self._score(rec, o, f, gt.values, gt.value)
+                self._score(rec, o, f, gt.values, gt.display_value)
             elif f.ground_truth and run.experiment_id is None and not self._gt:
                 # Legacy static label — only for ordinary live/demo runs whose
                 # page has no per-snapshot labels at all (never mixed).
@@ -499,8 +510,13 @@ class ScrapePipeline:
             rec.exact_match = fp == 0 and fn == 0
             prf = token_prf(" ".join(preds), " ".join(gt_values))
         else:
-            rec.exact_match = bool(o.success and exact_match(o.raw_value, gt_values[0], f.field_type))
-            prf = token_prf(o.raw_value if o.success else "", gt_values[0])
+            # Several acceptable forms (alternatives): any exact match counts;
+            # token F1 is the best over the forms.
+            pred = o.raw_value if o.success else ""
+            rec.exact_match = bool(o.success and any(
+                exact_match(pred, g, f.field_type) for g in gt_values))
+            scores = [p for p in (token_prf(pred, g) for g in gt_values) if p is not None]
+            prf = max(scores, key=lambda t: t[2]) if scores else None
         rec.matches_ground_truth = rec.exact_match
         if prf is not None:
             rec.token_precision, rec.token_recall, rec.token_f1 = prf

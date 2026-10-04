@@ -8,14 +8,20 @@ from ..models import Experiment
 
 
 def get_experiment(name: str | None) -> Experiment:
+    from .protocol import configure
+
     if name:
         try:
-            return Experiment.objects.get(name=name)
+            exp = Experiment.objects.get(name=name)
         except Experiment.DoesNotExist as exc:
             raise CommandError(f"No experiment named {name!r}. Run eval_init first.") from exc
+        configure(exp)
+        return exp
     qs = Experiment.objects.all()
     if qs.count() == 1:
-        return qs.first()
+        exp = qs.first()
+        configure(exp)
+        return exp
     if not qs.exists():
         raise CommandError("No experiment yet. Run: python manage.py eval_init --config eval/sites.yaml")
     raise CommandError("Several experiments exist; pass --experiment NAME")

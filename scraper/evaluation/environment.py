@@ -42,13 +42,15 @@ def capture() -> dict:
         "cpu_count": os.cpu_count(),
         "packages": {
             name: _version(name)
-            for name in ("Django", "lxml", "requests", "tiktoken", "PyYAML", "openpyxl", "anthropic")
+            for name in ("Django", "lxml", "requests", "tiktoken", "PyYAML", "openpyxl", "anthropic",
+                         "playwright", "scipy")
         },
         "git_commit": _git(["rev-parse", "HEAD"]),
         "git_dirty": bool(_git(["status", "--porcelain"])),
         "tokenizer": tokens.tokenizer_name(),
         "prompt_version": PROMPT_VERSION,
         "llm_max_input_chars": settings.SCRAPER.get("LLM_MAX_INPUT_CHARS"),
+        "structured_data": settings.SCRAPER.get("STRUCTURED_DATA", True),
         "llm_max_retries": settings.SCRAPER.get("LLM_MAX_RETRIES"),
         "llm_max_wait_seconds": settings.SCRAPER.get("LLM_MAX_WAIT_SECONDS"),
         "pricing": settings.SCRAPER.get("PRICING") or {},

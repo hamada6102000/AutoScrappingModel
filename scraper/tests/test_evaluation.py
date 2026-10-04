@@ -48,6 +48,19 @@ class FlakyProvider(LLMProvider):
         return self.inner.generate_xpaths(pruned_html, fields, failure_history)
 
 
+class BrokenProvider(LLMProvider):
+    """The provider cannot be reached at all (e.g. prompt larger than the TPM limit)."""
+
+    name = "groq"
+    model = "broken-model"
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def generate_xpaths(self, pruned_html, fields, failure_history=None):
+        raise self.exc
+
+
 class HarnessTests(TempDataDirMixin, TestCase):
     def prepare(self, xlsx=False):
         quiet("eval_init", config=str(SELFTEST_CONFIG))
@@ -161,6 +174,19 @@ class HarnessTests(TempDataDirMixin, TestCase):
         self.assertNotIn("stopped", stats)
         self.assertEqual(stats["skipped"], done)
         self.assertEqual(ScrapeRun.objects.filter(experiment=exp, completed=True).count(), 2 * 2 * 9)
+
+    def test_provider_errors_stop_instead_of_counting_as_failures(self):
+        from scraper.llm.base import RequestTooLarge
+        exp = self.prepare()
+        stats = EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"],
+                                 provider=BrokenProvider(RequestTooLarge("too large"))).run()
+        self.assertIn("provider error", stats["stopped"])
+        self.assertFalse(stats["retryable"])
+        self.assertFalse(ScrapeRun.objects.filter(experiment=exp).exists())
+        stats = EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"],
+                                 provider=BrokenProvider(ConnectionError("reset"))).run()
+        self.assertTrue(stats["retryable"])
+        self.assertFalse(LLMCallLog.objects.filter(run__experiment=exp).exists())
 
     def test_llm_call_budget(self):
         exp = self.prepare()

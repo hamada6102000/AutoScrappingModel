@@ -28,6 +28,13 @@ SYSTEM_PROMPT = (
     "one attribute/text node). For a list field, it must select every item.\n"
     "- Long texts are shortened with '…' and long runs of similar siblings are "
     "summarised by an HTML comment; do not depend on the hidden parts.\n"
+    "- A value may be in an attribute: select it with /@content, /@href, /@src, "
+    "/@datetime or /@class.\n"
+    "- If present, <section id=\"page-metadata\"> holds the page's <title>, <meta> tags, "
+    "canonical <link> and JSON-LD structured data (nested div[@data-key] elements); "
+    "use it when a field is only there.\n"
+    "- For a yes/no (boolean) field, select the element whose text states yes/no, or "
+    "write an XPath boolean() expression.\n"
     "- If a field cannot be found, map it to an empty string.\n"
     "- Do not wrap the JSON in markdown fences or add commentary."
 )

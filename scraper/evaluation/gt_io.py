@@ -36,6 +36,7 @@ INSTRUCTIONS = [
     "2. In 'value', type or paste each field's value exactly as it appears there.",
     "   - List fields: one item per line (Alt+Enter inside the cell), or separate items with ||",
     f"   - If the field does not exist on that page, write {ABSENT}",
+    "   - Single field with two acceptable forms (e.g. one date shown in two time zones): A || B",
     "3. Put your name/initials in 'verified_by'. Use 'notes' for anything ambiguous.",
     "4. Leave every other column unchanged. Save, then run:",
     "   python manage.py eval_gt_import --experiment <name> --file <this file>",
@@ -68,7 +69,7 @@ def template_rows(exp, kind: str = SnapshotKind.BASELINE, label: str | None = "b
                 elif f["cardinality"] == "many":
                     value = "\n".join(g.values)
                 else:
-                    value = g.value
+                    value = g.display_value
             rows.append({
                 "snapshot_id": snap.pk,
                 "site_key": snap.site_key,
@@ -211,6 +212,10 @@ def import_ground_truth(exp, path: Path, default_verifier: str = "") -> dict:
         elif fdef["cardinality"] == "many":
             parts = raw.replace("||", "\n").splitlines()
             value = json.dumps([p.strip() for p in parts if p.strip()], ensure_ascii=False)
+        elif "||" in raw:
+            # Several acceptable forms of one value (e.g. the same instant in two time zones).
+            forms = [p.strip() for p in raw.split("||") if p.strip()]
+            value = json.dumps({"any": forms}, ensure_ascii=False)
         else:
             value = raw
         GroundTruth.objects.update_or_create(

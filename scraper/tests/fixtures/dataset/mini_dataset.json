@@ -1,0 +1,32 @@
+{
+  "dataset_name": "mini_test_dataset",
+  "verified_at": "2026-10-04",
+  "sites": [
+    {
+      "site_id": "site_001",
+      "website": "Lumen Outfitters (test)",
+      "url": "https://lumen.example.test/products/trail-lamp-300",
+      "category": "E-commerce",
+      "page_type": "Product page",
+      "notes": "fixture",
+      "fields": [
+        {"field_name": "product_title", "type": "text", "required": "Yes", "cardinality": "Single", "current_value": "Trail Lamp 300", "dynamic": "No", "source": "visible", "description": "Product name (H1)"},
+        {"field_name": "price", "type": "price", "required": "Yes", "cardinality": "Single", "current_value": "$49.00", "dynamic": "Yes", "source": "visible+json-ld", "description": "Price"},
+        {"field_name": "sku", "type": "text", "required": "Yes", "cardinality": "Single", "current_value": "TL-300-BLK", "dynamic": "No", "source": "json-ld", "description": "SKU"},
+        {"field_name": "availability", "type": "text", "required": "No", "cardinality": "Single", "current_value": "InStock (https://schema.org/InStock)", "dynamic": "Yes", "source": "json-ld", "description": "Availability"},
+        {"field_name": "review_count", "type": "number", "required": "No", "cardinality": "Single", "current_value": "6574", "dynamic": "Yes", "source": "json-ld", "description": "Number of reviews"},
+        {"field_name": "star_rating", "type": "number", "required": "No", "cardinality": "Single", "current_value": "4", "dynamic": "No", "source": "html-class", "description": "Star rating from the CSS class"},
+        {"field_name": "summary", "type": "text", "required": "No", "cardinality": "Single", "current_value": "A rugged 300-lumen trail lamp with a 40-hour battery.", "dynamic": "No", "source": "meta", "description": "Meta description"},
+        {"field_name": "description", "type": "text", "required": "Yes", "cardinality": "Single", "current_value": "Built for long nights on the trail, the Trail Lamp 300 … (truncated)", "dynamic": "No", "source": "visible", "description": "Description paragraph"},
+        {"field_name": "in_the_box", "type": "text", "required": "Yes", "cardinality": "List", "current_value": "Trail Lamp 300; Head strap; … ; Quick start guide (5 items)", "dynamic": "No", "source": "visible", "description": "Box contents"},
+        {"field_name": "waterproof", "type": "boolean", "required": "No", "cardinality": "Single", "current_value": "true (Yes)", "dynamic": "No", "source": "visible", "description": "Waterproof"},
+        {"field_name": "weight", "type": "other", "required": "No", "cardinality": "Single", "current_value": "3.1 ounces (88 g)", "dynamic": "No", "source": "visible", "description": "Weight"},
+        {"field_name": "ship_date", "type": "date", "required": "No", "cardinality": "Single", "current_value": "2026-09-08 (shown 'Sep 8, 2026')", "dynamic": "No", "source": "visible", "description": "Shipping date"},
+        {"field_name": "image_url", "type": "url", "required": "No", "cardinality": "Single", "current_value": "https://lumen.example.test/media/trail-lamp.jpg", "dynamic": "No", "source": "visible", "description": "Main image"},
+        {"field_name": "product_url", "type": "url", "required": "Yes", "cardinality": "Single", "current_value": "https://lumen.example.test/products/trail-lamp-300", "dynamic": "No", "source": "url", "description": "Page URL"},
+        {"field_name": "body_text", "type": "text", "required": "No", "cardinality": "Single", "current_value": "(product body, ~40 words)", "dynamic": "No", "source": "visible", "description": "Body"},
+        {"field_name": "gift_wrap", "type": "text", "required": "No", "cardinality": "Single", "current_value": "Available", "dynamic": "No", "source": "visible", "description": "Gift wrap"}
+      ]
+    }
+  ]
+}

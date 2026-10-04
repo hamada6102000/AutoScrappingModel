@@ -35,6 +35,23 @@ TARGETS = {
     "false_positive_rate": 0.05,
 }
 THRESHOLDS = (0.01, 0.05, 0.10, 0.20)
+METADATA_MARKERS = ("page-metadata", "data-jsonld", "data-key", "data-meta", "//meta", "/meta[",
+                    "link[@rel")
+
+
+def xpath_target(xpath: str | None) -> str:
+    """Where a rule reads from: the page-metadata block (meta tags, JSON-LD,
+    canonical link) or the page content."""
+    if not xpath:
+        return "none"
+    return "metadata" if any(m in xpath for m in METADATA_MARKERS) else "content"
+
+
+def source_group(source: str) -> str:
+    """Annotator's location of a value: on the rendered page (visible text,
+    a class name, a <time> element) or only in meta tags / JSON-LD / the URL."""
+    s = (source or "visible").lower()
+    return "visible" if any(k in s for k in ("visible", "html-class", "time")) else "metadata-only"
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +61,8 @@ def collect(exp) -> dict:
     cfg = exp.config
     site_cat = {s["key"]: s["category"] for s in cfg["sites"]}
     site_fields = {s["key"]: [f["name"] for f in s["fields"]] for s in cfg["sites"]}
+    field_source = {(s["key"], f["name"]): source_group(f.get("source", "")) for s in cfg["sites"]
+                    for f in s["fields"]}
     has_gt = {
         (g.snapshot_id, g.field_name)
         for g in GroundTruth.objects.filter(snapshot__experiment=exp)
@@ -71,7 +90,8 @@ def collect(exp) -> dict:
             "focus": mut.get("focus"), "affected": mut.get("affected"),
         }
     records = []
-    qs = ExtractedRecord.objects.filter(run__experiment=exp, run__completed=True).select_related("field")
+    qs = ExtractedRecord.objects.filter(run__experiment=exp, run__completed=True).select_related(
+        "field", "xpath_used")
     for rec in qs:
         run = runs.get(rec.run_id)
         if run is None:
@@ -87,6 +107,8 @@ def collect(exp) -> dict:
             "value": (rec.normalized_value or "")[:300], "gt_value": (rec.gt_value or "")[:300],
             "site": run["site"], "category": run["category"], "condition": run["condition"],
             "rep": run["rep"], "step": run["step"],
+            "source_group": field_source.get((run["site"], rec.field.name), "visible"),
+            "xpath_target": xpath_target(rec.xpath_used.xpath if rec.xpath_used_id else None),
         })
     events = [{
         "run_id": e.run_id, "resolution": e.resolution, "attempts": e.attempts,
@@ -113,6 +135,8 @@ def collect(exp) -> dict:
         "llm_view_tokens": s.llm_view_tokens, "view_truncated": s.llm_view_truncated,
         "reduction": s.token_reduction, "presence": s.field_presence,
         "suspected_block": (s.fetch_meta or {}).get("suspected_block"),
+        "render": (s.fetch_meta or {}).get("render_chosen") or (s.fetch_meta or {}).get("render")
+                  or (s.fetch_meta or {}).get("source"),
     } for s in Snapshot.objects.filter(experiment=exp, kind=SnapshotKind.BASELINE)]
     return {"runs": runs, "records": records, "events": events, "calls": calls,
             "baselines": baselines, "site_fields": site_fields,
@@ -449,6 +473,26 @@ def build(exp) -> dict:
                                         and r["true_change"]),
         }
 
+    # Where values were read from (structured metadata is untouched by the
+    # simulated layout changes, so results are also reported separately).
+    location = []
+    for c in ecfg["conditions"]:
+        for key, label in (("source_group", "annotated location"), ("xpath_target", "rule reads from")):
+            groups = sorted({r[key] for r in _recs(data, condition=c)})
+            for g in groups:
+                recs = [r for r in _recs(data, condition=c) if r[key] == g]
+                init = [r for r in recs if r["step"] == 0]
+                location.append({"condition": c, "split": label, "group": g,
+                                 "initial_f1": M.aggregate(init)["f1"] if init else None,
+                                 **{f"sustained_{k}": v for k, v in _f(M.aggregate(recs)).items()
+                                    if k in ("f1", "fields")}})
+    excluded = [{"site": s["key"], "field": f["name"], "reason": f.get("exclude_reason", "")}
+                for s in exp.config["sites"] for f in s.get("excluded_fields") or []]
+    n_fields = sum(len(s["fields"]) for s in exp.config["sites"])
+    render_modes = defaultdict(int)
+    for b in data["baselines"]:
+        render_modes[b.get("render") or "static"] += 1
+
     rq5_sites = [s for s in sites if s["self_healing_sustained_f1"] is not None]
     table51 = [
         _target_row("Initial extraction accuracy (F1)", initial["f1"], TARGETS["initial_f1"], ">="),
@@ -472,7 +516,12 @@ def build(exp) -> dict:
         "environment": exp.environment,
         "counts": {
             "sites": len(exp.config["sites"]),
+            "fields": n_fields,
+            "excluded_fields": len(excluded),
             "repetitions": ecfg["repetitions"],
+            "repetitions_completed": len({r["rep"] for r in data["runs"].values() if r["rep"]}),
+            "planned_repetitions": ecfg.get("planned_repetitions"),
+            "render_modes": dict(render_modes),
             "runs": len(data["runs"]),
             "records": len(data["records"]),
             "change_events": len(data["events"]),
@@ -503,6 +552,8 @@ def build(exp) -> dict:
         "rq4_events": rq4,
         "baselines": baselines_cmp,
         "natural": natural,
+        "by_location": location,
+        "excluded_fields": excluded,
         "_data": data,
     }
 
@@ -567,6 +618,9 @@ def write(exp, out_dir: Path) -> dict:
     _write_csv(tables / "token_reduction.csv", data["baselines"])
     _write_csv(tables / "baselines_o4.csv", rep["baselines"])
     _write_csv(tables / "runs_labelled.csv", list(data["runs"].values()))
+    _write_csv(tables / "accuracy_by_location.csv", rep["by_location"])
+    _write_csv(tables / "excluded_fields.csv", rep["excluded_fields"])
+    _write_csv(tables / "field_records.csv", data["records"])
 
     (out_dir / "report.md").write_text(render_markdown(rep), encoding="utf-8")
     return rep
@@ -578,8 +632,15 @@ def render_markdown(rep: dict) -> str:
     cfg = rep["config"]
     env = rep["environment"]
     L.append(f"# Evaluation report — {rep['experiment']}\n")
-    L.append(f"{c['sites']} sites x {c['repetitions']} repetitions; {c['runs']} runs, "
-             f"{c['records']} field records, {c['change_events']} change events.  ")
+    planned = c.get("planned_repetitions")
+    L.append(f"{c['sites']} sites, {c.get('fields', 'n/a')} fields ({c.get('excluded_fields', 0)} more "
+             f"excluded, listed below); repetitions configured {c['repetitions']}, with runs "
+             f"{c.get('repetitions_completed', 'n/a')}"
+             + (f" (study design: {planned} planned)" if planned else "")
+             + f"; {c['runs']} runs, {c['records']} field records, {c['change_events']} change events.  ")
+    if c.get("render_modes"):
+        L.append("Snapshot render modes: " + ", ".join(f"{k} {v}" for k, v in sorted(c["render_modes"].items()))
+                 + ".  ")
     L.append(f"LLM: {cfg['llm']['provider']} / {cfg['llm'].get('model') or 'default model'}; "
              f"threshold {cfg['health_threshold']}, max attempts {cfg['max_heal_attempts']}, "
              f"memory {cfg['failure_memory_size']}, seed {cfg['seed']}.  ")
@@ -656,6 +717,16 @@ def render_markdown(rep: dict) -> str:
     r5 = rep["rq5"]
     L.append(f"\nRQ5: {r5['sites_sustained_f1_ge_0_80']} of {r5['sites']} sites keep sustained F1 >= 80%.\n")
 
+    if rep.get("by_location"):
+        L.append("## Accuracy by value location\n")
+        L.append("Structured metadata (meta tags, JSON-LD, canonical link) is not modified by the "
+                 "simulated layout changes, so results are split by where the value lives.\n")
+        L.append("| Condition | Split | Group | Initial F1 | Sustained F1 | Field decisions |\n|---|---|---|---|---|---|")
+        for row in rep["by_location"]:
+            L.append(f"| {row['condition']} | {row['split']} | {row['group']} | {_pct(row['initial_f1'])} | "
+                     f"{_pct(row['sustained_f1'])} | {row['sustained_fields']} |")
+        L.append("")
+
     L.append("## Repetitions\n")
     for k, v in rep["repetition_summary"].items():
         L.append(f"- {k}: mean {_pct(v['mean'])} +/- {_pct(v['std'])} (n={v['n']})")
@@ -695,6 +766,11 @@ def render_markdown(rep: dict) -> str:
         L.append(f"Breaking events {n['healing']['breaking_events']}, GT-verified healing "
                  f"{_pct(n['healing']['success_rate_gt'])}; human-labelled layout changes "
                  f"{n['human_layout_changed']}.\n")
+
+    if rep.get("excluded_fields"):
+        L.append("\n## Excluded fields\n")
+        for e in rep["excluded_fields"]:
+            L.append(f"- {e['site']}.{e['field']}: {e['reason']}")
 
     L.append("\n## Definitions\n")
     L.append("- Field decision: one field in one run. TP = extracted and equal to the label after "

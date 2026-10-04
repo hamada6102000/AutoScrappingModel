@@ -63,3 +63,24 @@ def visible_text(root) -> str:
     if root is None:
         return ""
     return re.sub(r"\s+", " ", root.text_content() or "").strip()
+
+
+SEARCH_ATTRS = ("content", "href", "src", "datetime", "title", "alt", "aria-label", "class", "value")
+
+
+def searchable_text(root, base_url: str | None = None) -> str:
+    """Element text plus attribute values (meta content, href/src resolved,
+    datetime, class ...): everything an XPath could return as a value."""
+    if root is None:
+        return ""
+    from urllib.parse import urljoin
+
+    parts = [visible_text(root)]
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        for a in SEARCH_ATTRS:
+            v = el.get(a)
+            if v:
+                parts.append(urljoin(base_url, v) if base_url and a in ("href", "src") else v)
+    return " \n ".join(parts)

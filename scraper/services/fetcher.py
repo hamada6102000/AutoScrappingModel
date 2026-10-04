@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import re
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 import requests
+from django.conf import settings
 from lxml import etree
 
 from . import tokens as tok
@@ -56,8 +58,11 @@ KEEP_ATTRS = {
     "class", "id", "itemprop", "itemtype", "itemscope", "property", "content",
     "datetime", "href", "src", "title", "alt", "aria-label", "name", "rel",
     "lang", "role", "data-testid", "data-test", "data-qa", "data-field",
+    # attributes of the page-metadata block (see _metadata_block)
+    "data-key", "data-jsonld", "data-meta",
 }
 VALUE_ATTRS = ("content", "datetime", "alt", "aria-label", "title")
+VALUE_CLASS = re.compile(r"rating|\bstars?\b", re.I)
 KEEP_EMPTY = {"img", "br", "hr", "td", "th", "tr", "time", "meta", "link"}
 COLLAPSIBLE = {"div", "span", "section"}
 INLINE = {
@@ -258,6 +263,8 @@ def _clean_tree(root, keep_tags=()) -> None:
                 continue
             if any(el.get(a) for a in VALUE_ATTRS):
                 continue
+            if VALUE_CLASS.search(el.get("class") or ""):
+                continue  # rating widgets encode the value in the class ("star-rating Three")
             if el.tag == "a" and el.get("href") and (el.get("title") or el.get("aria-label")):
                 continue
             _remove(el)
@@ -283,8 +290,146 @@ def _clean_tree(root, keep_tags=()) -> None:
             changed = True
 
 
+
+# ---------------------------------------------------------------------------
+# Page metadata block (structured data exposed to XPath)
+# ---------------------------------------------------------------------------
+METADATA_ID = "page-metadata"
+# <meta> names that never carry page data.
+_META_SKIP = re.compile(
+    r"^(viewport|theme-color|color-scheme|referrer|robots|googlebot|format-detection|"
+    r"google-site-verification|msvalidate\.01|yandex-verification|apple-itunes-app|"
+    r"apple-mobile-web-app.*|mobile-web-app-capable|msapplication-.*|csrf.*|"
+    r"generator|handheldfriendly|mobileoptimized)$",
+    re.I,
+)
+_JSONLD_MAX_NODES = 4000
+_JSONLD_MAX_DEPTH = 12
+
+
+def structured_data_enabled() -> bool:
+    try:
+        return bool(settings.SCRAPER.get("STRUCTURED_DATA", True))
+    except Exception:  # pragma: no cover - settings not configured
+        return True
+
+
+def _collect_metadata(root) -> dict:
+    """Read <title>, document-level <meta>/<link rel=canonical> and JSON-LD
+    from the raw tree (before cleaning removes them)."""
+    title = ""
+    t = root.find(".//title")
+    if t is not None:
+        title = _WS.sub(" ", t.text_content() or "").strip()
+    metas, canonical, jsonld = [], "", []
+    for el in root.iter("meta"):
+        if el.get("itemprop") and _has_ancestor(el, {"body"}):
+            continue  # body microdata stays where it is
+        key_attr = next((a for a in ("property", "name", "itemprop") if el.get(a)), None)
+        content = (el.get("content") or "").strip()
+        if not key_attr or not content or _META_SKIP.match(el.get(key_attr).strip()):
+            continue
+        metas.append((key_attr, el.get(key_attr).strip(), _WS.sub(" ", content)))
+    for el in root.iter("link"):
+        if "canonical" in (el.get("rel") or "").lower().split() and el.get("href"):
+            canonical = el.get("href").strip()
+            break
+    for el in root.iter("script"):
+        if (el.get("type") or "").strip().lower() != "application/ld+json":
+            continue
+        text = (el.text or "").strip()
+        if text.startswith("<!--"):
+            text = text[4:]
+        if text.endswith("-->"):
+            text = text[:-3]
+        text = text.strip().removeprefix("//<![CDATA[").removesuffix("//]]>").strip()
+        # Numbers are kept as written ("59.00", not 59.0).
+        load = lambda t: json.loads(t, parse_float=str, parse_int=str)  # noqa: E731
+        try:
+            jsonld.append(load(text))
+        except ValueError:
+            try:  # tolerate trailing commas, a frequent JSON-LD error
+                jsonld.append(load(re.sub(r",\s*([}\]])", r"\1", text)))
+            except ValueError:
+                continue
+    return {"title": title, "metas": metas, "canonical": canonical, "jsonld": jsonld}
+
+
+def _json_nodes(key, value, depth, budget) -> list:
+    if budget[0] <= 0 or depth > _JSONLD_MAX_DEPTH or value is None:
+        return []
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_json_nodes(key, item, depth, budget))
+        return out
+    el = etree.Element("div")
+    if key is not None:
+        el.set("data-key", str(key)[:80])
+    budget[0] -= 1
+    if isinstance(value, dict):
+        for k, v in value.items():
+            for child in _json_nodes(k, v, depth + 1, budget):
+                el.append(child)
+        return [el] if len(el) else []
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    else:
+        text = _WS.sub(" ", str(value)).strip()
+    if not text:
+        return []
+    el.text = text
+    return [el]
+
+
+def _metadata_block(meta: dict):
+    """<section id="page-metadata"> holding the document title, meta tags,
+    the canonical link and every JSON-LD block as nested div[data-key]."""
+    section = etree.Element("section")
+    section.set("id", METADATA_ID)
+    if meta["title"]:
+        t = etree.SubElement(section, "div")
+        t.set("data-meta", "title")
+        t.text = meta["title"]
+    for attr, name, content in meta["metas"]:
+        m = etree.SubElement(section, "meta")
+        m.set(attr, name)
+        m.set("content", content)
+    if meta["canonical"]:
+        link = etree.SubElement(section, "link")
+        link.set("rel", "canonical")
+        link.set("href", meta["canonical"])
+    budget = [_JSONLD_MAX_NODES]
+    blocks = []
+    for i, data in enumerate(meta["jsonld"], start=1):
+        if isinstance(data, list):  # a top-level array: one block per object
+            blocks.extend((f"{i}.{j}", item) for j, item in enumerate(data, start=1))
+        else:
+            blocks.append((str(i), data))
+    for label, data in blocks:
+        nodes = _json_nodes(None, data, 0, budget)
+        if not nodes:
+            continue
+        block = nodes[0]  # the object itself, without a data-key
+        block.set("data-jsonld", label)
+        section.append(block)
+    return section if len(section) else None
+
+
+def _insert_metadata(root, meta: dict) -> None:
+    section = _metadata_block(meta)
+    if section is None:
+        return
+    body = root.find("body")
+    if body is None:
+        body = root
+    section.tail = body.text
+    body.text = None
+    body.insert(0, section)
+
+
 def _signature(el) -> tuple:
-    return (el.tag, tuple(sorted((el.get("class") or "").split())))
+    return (el.tag, tuple(sorted((el.get("class") or "").split())), el.get("data-key"))
 
 
 def _truncate(text: str | None, limit: int):
@@ -322,6 +467,7 @@ def _llm_view(clean_root) -> str:
                 marker = etree.Comment(
                     f" +{len(hidden)} more similar <{sig[0]}"
                     + (f' class="{cls}"' if cls else "")
+                    + (f' data-key="{sig[2]}"' if sig[2] else "")
                     + "> elements omitted "
                 )
                 run[RUN_KEEP - 1].addnext(marker)
@@ -333,13 +479,24 @@ def _llm_view(clean_root) -> str:
     return to_html(root)
 
 
-def prune(raw_html: str, keep_tags=()) -> PrunedPage:
-    """Return the clean extraction DOM, the LLM view, profiles and tokens."""
+def prune(raw_html: str, keep_tags=(), structured: bool | None = None) -> PrunedPage:
+    """Return the clean extraction DOM, the LLM view, profiles and tokens.
+
+    With structured data on (``SCRAPER["STRUCTURED_DATA"]``, default), the
+    document title, meta tags, canonical link and JSON-LD blocks — removed with
+    <head>/<script> — are re-inserted as a <section id="page-metadata"> at the
+    top of <body> so XPath can address them.
+    """
     root = parse_html(raw_html)
     if root is None:
         return PrunedPage(tokenizer=tok.tokenizer_name(), raw_chars=len(raw_html or ""),
                           raw_tokens=tok.count_tokens(raw_html or ""))
+    if structured is None:
+        structured = structured_data_enabled()
+    meta = _collect_metadata(root) if structured else None
     _clean_tree(root, keep_tags)
+    if meta:
+        _insert_metadata(root, meta)
     clean_html = to_html(root)
     view = _llm_view(root)
     tag_profile, markup_profile = dom_profiles(root)
@@ -442,8 +599,23 @@ def fetch_raw(url: str, timeout: int = 20, user_agent: str = "SelfHealingScraper
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
-                page = browser.new_page(user_agent=user_agent)
-                response = page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+                context = browser.new_context(
+                    user_agent=user_agent, locale="en-US",
+                    viewport={"width": 1366, "height": 900},
+                    extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                )
+                page = context.new_page()
+                response = page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+                # Pages with live tickers/ads never go network-idle: bounded wait.
+                try:
+                    page.wait_for_load_state("networkidle", timeout=12000)
+                except Exception:
+                    meta["networkidle"] = False
+                # Scroll so lazy-loaded sections (reviews, tables) render.
+                for _ in range(8):
+                    page.mouse.wheel(0, 2400)
+                    page.wait_for_timeout(400)
+                page.wait_for_timeout(2000)
                 html = page.content()
                 status = response.status if response else 0
                 meta["final_url"] = page.url

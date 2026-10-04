@@ -176,6 +176,11 @@ SCRAPER = {
     # LLM results are never silently mixed with heuristic ones.
     "ALLOW_FALLBACK": env_bool("SCRAPER_ALLOW_FALLBACK", True),
 
+    # Layer 1: re-insert the document title, <meta> tags, canonical link and
+    # JSON-LD (all removed with <head>/<script>) as <section id="page-metadata">
+    # so fields that only live there can be addressed by XPath.
+    "STRUCTURED_DATA": env_bool("SCRAPER_STRUCTURED_DATA", True),
+
     # Upper bound on the pruned HTML characters sent to the LLM. Anything cut
     # is flagged (llm_input_truncated) so it can be reported.
     "LLM_MAX_INPUT_CHARS": env_int("SCRAPER_LLM_MAX_INPUT_CHARS", 60000),

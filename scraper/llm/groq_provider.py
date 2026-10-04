@@ -71,6 +71,7 @@ class GroqProvider(LLMProvider):
         self.max_wait_seconds = max_wait_seconds
         self.max_input_chars = max_input_chars
         self._sleep = sleep
+        self.last_rate_limits: dict = {}
 
     def generate_xpaths(
         self,
@@ -83,7 +84,9 @@ class GroqProvider(LLMProvider):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
-        data, call = self._chat(messages)
+        # Room for one XPath per field (~70 tokens each in JSON), bounded.
+        max_tokens = min(4096, 300 + 70 * len(fields))
+        data, call = self._chat(messages, max_tokens=max_tokens)
         text = data["choices"][0]["message"]["content"] or ""
         usage = data.get("usage", {}) or {}
         return LLMResult(
@@ -101,14 +104,14 @@ class GroqProvider(LLMProvider):
         )
 
     # ------------------------------------------------------------------
-    def _chat(self, messages: list[dict]) -> tuple[dict, dict]:
+    def _chat(self, messages: list[dict], max_tokens: int = 1500) -> tuple[dict, dict]:
         url = f"{self.base}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": 1500,
+            "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
         }
         waited = 0.0
@@ -129,13 +132,18 @@ class GroqProvider(LLMProvider):
                 continue
             latency_ms = int((time.perf_counter() - start) * 1000)
             status = resp.status_code
+            limits = {k.lower(): v for k, v in (getattr(resp, "headers", {}) or {}).items()
+                      if k.lower().startswith("x-ratelimit")}
+            if limits:
+                self.last_rate_limits = limits
 
             if status == 429:
                 delay = _parse_wait_seconds(resp) or min(2 ** (retries + 1), 60)
                 if retries >= self.max_retries or waited + delay > self.max_wait_seconds:
                     raise RateLimitExhausted(
                         f"Groq rate limit still exceeded after {retries} retries / "
-                        f"{int(waited)}s waiting: {resp.text[:200]}"
+                        f"{int(waited)}s waiting: {resp.text[:300]}",
+                        retry_after=delay,
                     )
                 self._sleep(delay)
                 waited += delay

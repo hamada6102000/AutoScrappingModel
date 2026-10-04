@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from lxml import etree
 
 from .htmlutil import parse_html
-from .normalizer import normalize
+from .normalizer import normalize, number_word, parse_bool, resolve_url
 
 _DIGIT = re.compile(r"\d")
 _WS = re.compile(r"\s+")
@@ -36,12 +36,14 @@ class FieldOutcome:
 
 
 def _node_text(node) -> str:
+    if isinstance(node, bool):  # boolean() results
+        return "true" if node else "false"
+    if isinstance(node, float) and node.is_integer():  # count() results
+        return str(int(node))
     if isinstance(node, str):  # attribute / text() results (lxml smart strings)
         return node
     if hasattr(node, "text_content"):
         return node.text_content()
-    if isinstance(node, (int, float, bool)):
-        return str(node)
     return str(node)
 
 
@@ -49,11 +51,28 @@ def type_ok(value: str, field_type: str) -> bool:
     value = (value or "").strip()
     if not value:
         return False
-    if field_type in ("price", "number", "date"):
+    if field_type in ("price", "number"):
+        return bool(_DIGIT.search(value)) or number_word(value) is not None
+    if field_type == "date":
         return bool(_DIGIT.search(value))
     if field_type == "url":
         return not _WS.search(value)
+    if field_type == "boolean":
+        return parse_bool(value) is not None
     return True
+
+
+def _base_url(tree) -> str | None:
+    try:
+        return tree.getroottree().docinfo.URL
+    except AttributeError:
+        return None
+
+
+def set_base_url(tree, url: str | None) -> None:
+    """Remember the page URL on the tree so url fields resolve relative links."""
+    if tree is not None and url:
+        tree.getroottree().docinfo.URL = url
 
 
 def evaluate(tree, xpath: str):
@@ -81,6 +100,9 @@ def extract_one(tree, name: str, field_type: str, cardinality: str, xpath: str) 
         return FieldOutcome(name, xpath, False, reason=reason, cardinality=cardinality)
 
     texts = [_WS.sub(" ", _node_text(n)).strip() for n in nodes]
+    if field_type == "url":
+        base = _base_url(tree)
+        texts = [resolve_url(t, base) for t in texts]
 
     if cardinality == "many":
         raw = [t for t in texts if t]
