@@ -53,7 +53,14 @@ def _legend_top(ax):
     """Legend in the band above the plot, right-aligned (never over data)."""
     labels = ax.get_legend_handles_labels()[1]
     ncols = 4 if sum(len(x) for x in labels) <= 70 else 2
-    ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncols=ncols, fontsize=8, borderaxespad=0.2)
+    leg = ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncols=ncols, fontsize=8, borderaxespad=0.2)
+    # If the left-aligned title runs into the legend, lift the title above it.
+    fig = ax.figure
+    fig.canvas.draw()
+    title = ax.title if ax.title.get_text() else ax._left_title
+    if title.get_text() and title.get_window_extent().overlaps(leg.get_window_extent()):
+        height_pt = leg.get_window_extent().height * 72 / fig.dpi
+        ax.set_title(title.get_text(), loc="left", pad=height_pt + 6)
 
 
 def _spread(ys: list[float], gap: float) -> list[float]:
