@@ -186,13 +186,20 @@ def read_rows(path: Path) -> tuple[list[dict], list[dict]]:
     raise ValueError(f"cannot decode {path}; save it as 'CSV UTF-8' or as .xlsx")
 
 
-def import_ground_truth(exp, path: Path, default_verifier: str = "") -> dict:
+def import_ground_truth(exp, path: Path, default_verifier: str = "", only_status=None,
+                        source: str = GTSource.HUMAN, keep_existing: bool = False) -> dict:
+    """Import labels. ``only_status`` (pre-filled sheets) keeps only rows whose
+    prefill_status is in the set — e.g. {"found", "list-complete"} for values
+    found verbatim; ``source`` records how the labels were obtained."""
     rows, natural = read_rows(Path(path))
-    report = {"imported": 0, "absent": 0, "empty": 0, "errors": [], "warnings": [],
-              "snapshots": set()}
+    report = {"imported": 0, "absent": 0, "empty": 0, "skipped_status": 0, "errors": [],
+              "warnings": [], "snapshots": set()}
     for i, row in enumerate(rows, start=2):
         sid, field = (row.get("snapshot_id") or "").strip(), (row.get("field") or "").strip()
         if not sid and not field:
+            continue
+        if only_status is not None and (row.get("prefill_status") or "").strip() not in only_status:
+            report["skipped_status"] += 1
             continue
         try:
             snap = Snapshot.objects.get(pk=int(float(sid)), experiment=exp)
@@ -204,6 +211,10 @@ def import_ground_truth(exp, path: Path, default_verifier: str = "") -> dict:
         raw = (row.get("value") or "").strip()
         if not raw:
             report["empty"] += 1
+            continue
+        if keep_existing and GroundTruth.objects.filter(snapshot=snap, field_name=field).exists():
+            report.setdefault("kept_existing", 0)
+            report["kept_existing"] += 1
             continue
         notes = (row.get("notes") or "").strip()
         if raw.upper() == ABSENT:
@@ -221,7 +232,7 @@ def import_ground_truth(exp, path: Path, default_verifier: str = "") -> dict:
         GroundTruth.objects.update_or_create(
             snapshot=snap, field_name=field,
             defaults={
-                "cardinality": fdef["cardinality"], "value": value, "source": GTSource.HUMAN,
+                "cardinality": fdef["cardinality"], "value": value, "source": source,
                 "verified_by": (row.get("verified_by") or default_verifier or "").strip(),
                 "notes": notes,
             },

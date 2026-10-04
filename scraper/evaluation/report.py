@@ -25,6 +25,7 @@ from ..models import (
     RecordPhase, ScrapeRun, Snapshot, SnapshotKind,
 )
 from . import metrics as M
+from .config import COND_INFO, CONDITION_ORDER
 
 TARGETS = {
     "initial_f1": 0.85,
@@ -138,8 +139,11 @@ def collect(exp) -> dict:
         "render": (s.fetch_meta or {}).get("render_chosen") or (s.fetch_meta or {}).get("render")
                   or (s.fetch_meta or {}).get("source"),
     } for s in Snapshot.objects.filter(experiment=exp, kind=SnapshotKind.BASELINE)]
+    gt_sources = defaultdict(int)
+    for g in GroundTruth.objects.filter(snapshot__experiment=exp, snapshot__kind=SnapshotKind.BASELINE):
+        gt_sources["absent" if g.notes == "absent" else g.source] += 1
     return {"runs": runs, "records": records, "events": events, "calls": calls,
-            "baselines": baselines, "site_fields": site_fields,
+            "baselines": baselines, "site_fields": site_fields, "gt_sources": dict(gt_sources),
             "list_threshold": cfg["experiment"].get("list_correct_f1", 0.9)}
 
 
@@ -224,8 +228,8 @@ def _runs(data, *, condition=None, step_min=None, rep_min=1, rep_eq=None):
     return out
 
 
-def healing_section(data, rep_min=1, rep_eq=None) -> dict:
-    runs = [r for r in _runs(data, condition="self_healing", step_min=1, rep_min=rep_min, rep_eq=rep_eq)
+def healing_section(data, rep_min=1, rep_eq=None, condition="self_healing") -> dict:
+    runs = [r for r in _runs(data, condition=condition, step_min=1, rep_min=rep_min, rep_eq=rep_eq)
             if r["breaking"]]
     alarmed = [r for r in runs if r["detected"]]
     gt_ok = [r for r in alarmed if r["gt_recovered"]]
@@ -296,7 +300,7 @@ def detection_section(data, condition="self_healing", rep_min=1, rep_eq=None) ->
     return rows
 
 
-def rq4_rows(data, rep_min=1) -> list[dict]:
+def rq4_rows(data, rep_min=1, condition="self_healing") -> list[dict]:
     calls_by_run = defaultdict(list)
     for c in data["calls"]:
         if c["purpose"] == LLMPurpose.HEALING:
@@ -304,7 +308,7 @@ def rq4_rows(data, rep_min=1) -> list[dict]:
     rows = []
     for e in data["events"]:
         run = data["runs"].get(e["run_id"])
-        if not run or run["condition"] != "self_healing" or e["resolution"] == "not_attempted":
+        if not run or run["condition"] != condition or e["resolution"] == "not_attempted":
             continue
         if run["rep"] is None or run["rep"] < rep_min:
             continue
@@ -325,18 +329,90 @@ def rq4_rows(data, rep_min=1) -> list[dict]:
     return rows
 
 
-def per_site(data) -> list[dict]:
+def per_site(data, conds=("self_healing", "static")) -> list[dict]:
     rows = []
     for site, fields in data["site_fields"].items():
-        row = {"site": site}
-        for cond in ("self_healing", "static"):
-            agg = M.aggregate(_recs(data, condition=cond, sites={site}))
-            row[f"{cond}_sustained_f1"] = agg["f1"]
-        init = M.aggregate(_recs(data, condition="self_healing", step=0, sites={site}))
-        row["initial_f1"] = init["f1"]
-        row["category"] = next((b["category"] for b in data["baselines"] if b["site"] == site), "")
+        row = {"site": site,
+               "category": next((b["category"] for b in data["baselines"] if b["site"] == site), "")}
+        for cond in conds:
+            row[f"{cond}_initial_f1"] = M.aggregate(_recs(data, condition=cond, step=0, sites={site}))["f1"]
+            row[f"{cond}_sustained_f1"] = M.aggregate(_recs(data, condition=cond, sites={site}))["f1"]
+        row["initial_f1"] = row.get("self_healing_initial_f1")
+        row.setdefault("self_healing_sustained_f1", None)
+        row.setdefault("static_sustained_f1", None)
         rows.append(row)
     return rows
+
+
+def present_conditions(data, ecfg) -> list[str]:
+    ran = {r["condition"] for r in data["runs"].values() if r["rep"]}
+    return [c for c in CONDITION_ORDER if c in ecfg["conditions"] and c in ran]
+
+
+def module_rows(data, conds) -> list[dict]:
+    """One row per module: accuracy, P/R/F1 at t0 and under change, failure
+    detection, healing success, time-to-recovery and latency."""
+    rows = []
+    for c in conds:
+        info = COND_INFO[c]
+        recs = _recs(data, condition=c)
+        init = M.aggregate([r for r in recs if r["step"] == 0])
+        changed = M.aggregate([r for r in recs if r["step"] and r["step"] >= 1])
+        overall = M.aggregate(recs)
+        det = next((d for d in detection_section(data, condition=c)
+                    if d["label"].startswith("degraded") and d["signal"].startswith("alarm")), None)
+        heal = healing_section(data, condition=c) if info["heal"] else None
+        events = [e for e in rq4_rows(data, condition=c) if e["resolution"] == "auto_healed"]
+        heal_calls = [x for x in data["calls"]
+                      if x["purpose"] == LLMPurpose.HEALING and data["runs"].get(x["run_id"], {}).get("condition") == c]
+        monitoring = _runs(data, condition=c, step_min=1)
+        degraded = [r for r in monitoring if r["degraded"] is not None]
+        scored = sum(1 for r in recs if r["has_gt"])
+        rows.append({
+            "condition": c, "module": info["label"],
+            "field_decisions": len(recs), "scored_decisions": scored,
+            "initial_accuracy": init["field_accuracy"], "initial_precision": init["precision"],
+            "initial_recall": init["recall"], "initial_f1": init["f1"],
+            "changed_accuracy": changed["field_accuracy"], "changed_precision": changed["precision"],
+            "changed_recall": changed["recall"], "changed_f1": changed["f1"],
+            "overall_accuracy": overall["field_accuracy"], "overall_precision": overall["precision"],
+            "overall_recall": overall["recall"], "overall_f1": overall["f1"],
+            "token_f1_mean": overall["token_f1_mean"],
+            "degraded_run_share": M.safe_div(sum(1 for r in degraded if r["degraded"]), len(degraded)),
+            "alarm_false_positive_rate": det["fpr"] if det else None,
+            "false_alarms_per_monitoring_run": det["false_alarm_share"] if det else None,
+            "silent_failures": det["fn"] if det else None,
+            "breaking_events": heal["breaking_events"] if heal else None,
+            "healing_success_rate": heal["success_rate_gt"] if heal else None,
+            "field_recovery_rate": heal["field_recovery_rate"] if heal else None,
+            "ttr_median_s": M.describe([e["ttr_excl_wait_ms"] / 1000 for e in events])["median"],
+            "regeneration_latency_median_s": M.describe(
+                [(x["latency_ms"] + x["validation_ms"]) / 1000 for x in heal_calls])["median"],
+            "run_latency_median_ms": M.describe([r["duration_ms"] for r in monitoring
+                                                 if r["duration_ms"] is not None])["median"],
+            "generator_calls": sum(r["llm_calls"] for r in _runs(data, condition=c)),
+            "llm_tokens": sum(r["prompt_tokens"] + r["completion_tokens"] for r in _runs(data, condition=c)),
+        })
+    return rows
+
+
+def paired_tests(data, conds) -> list[dict]:
+    """Per-site paired comparisons of sustained F1 (sites with both values)."""
+    pairs = [("self_healing", "static"), ("rule_based", "rule_static"), ("self_healing", "rule_based"),
+             ("rule_based", "static")]
+    out = []
+    sites = per_site(data, conds)
+    for a, b in pairs:
+        if a not in conds or b not in conds:
+            continue
+        diffs = [r[f"{a}_sustained_f1"] - r[f"{b}_sustained_f1"] for r in sites
+                 if r.get(f"{a}_sustained_f1") is not None and r.get(f"{b}_sustained_f1") is not None]
+        wins = sum(1 for d in diffs if d > 0)
+        losses = sum(1 for d in diffs if d < 0)
+        out.append({"a": a, "b": b, "sites": len(diffs), "mean_diff": M.describe(diffs)["mean"],
+                    "wins": wins, "losses": losses, "ties": len(diffs) - wins - losses,
+                    "sign_test_p": M.sign_test(wins, losses), "wilcoxon_p": M.wilcoxon(diffs)})
+    return out
 
 
 def build(exp) -> dict:
@@ -345,18 +421,19 @@ def build(exp) -> dict:
     ecfg = exp.config["experiment"]
     reps = list(range(1, ecfg["repetitions"] + 1))
 
+    module_conds = present_conditions(data, ecfg)
     initial = M.aggregate(_recs(data, condition="self_healing", step=0))
     sustained = {c: M.aggregate(_recs(data, condition=c)) for c in ecfg["conditions"]}
     healing = healing_section(data)
-    detection = detection_section(data) + (
-        detection_section(data, condition="static") if "static" in ecfg["conditions"] else [])
+    detection = [row for c in module_conds for row in detection_section(data, condition=c)]
     alarm_vs_degraded = next((d for d in detection if d["condition"] == "self_healing"
                               and d["label"].startswith("degraded")
                               and d["signal"].startswith("alarm")), None)
     ttr = [e for e in rq4_rows(data) if e["resolution"] == "auto_healed"]
     regen = [c for c in data["calls"]
              if c["purpose"] == LLMPurpose.HEALING and not c["fallback"]
-             and data["runs"].get(c["run_id"], {}).get("rep", 0)]
+             and data["runs"].get(c["run_id"], {}).get("rep", 0)
+             and data["runs"].get(c["run_id"], {}).get("condition") == "self_healing"]
     ttr_s = M.describe([e["ttr_excl_wait_ms"] / 1000 for e in ttr])
     ttr_incl_s = M.describe([e["ttr_ms"] / 1000 for e in ttr])
     regen_s = M.describe([(c["latency_ms"] + c["validation_ms"]) / 1000 for c in regen])
@@ -373,9 +450,9 @@ def build(exp) -> dict:
         row["operators"] = ", ".join(o for o in ops if o)
         by_step.append(row)
 
-    sites = per_site(data)
+    sites = per_site(data, module_conds)
     paired = None
-    if "static" in ecfg["conditions"]:
+    if "static" in module_conds and "self_healing" in module_conds:
         diffs = [r["self_healing_sustained_f1"] - r["static_sustained_f1"] for r in sites
                  if r["self_healing_sustained_f1"] is not None and r["static_sustained_f1"] is not None]
         wins = sum(1 for d in diffs if d > 0)
@@ -522,6 +599,8 @@ def build(exp) -> dict:
             "repetitions_completed": len({r["rep"] for r in data["runs"].values() if r["rep"]}),
             "planned_repetitions": ecfg.get("planned_repetitions"),
             "render_modes": dict(render_modes),
+            "baseline_labels_by_source": data.get("gt_sources", {}),
+            "unscored_decisions": sum(1 for r in data["records"] if not r["has_gt"]),
             "runs": len(data["runs"]),
             "records": len(data["records"]),
             "change_events": len(data["events"]),
@@ -543,6 +622,9 @@ def build(exp) -> dict:
         "rq5": {"sites": len(rq5_sites),
                 "sites_sustained_f1_ge_0_80": sum(1 for s in rq5_sites if s["self_healing_sustained_f1"] >= 0.8)},
         "paired_comparison": paired,
+        "conditions_run": module_conds,
+        "modules": module_rows(data, module_conds),
+        "paired_tests": paired_tests(data, module_conds),
         "per_repetition": per_rep,
         "repetition_summary": rep_summary,
         "tokens": tokens,
@@ -619,9 +701,16 @@ def write(exp, out_dir: Path) -> dict:
     _write_csv(tables / "baselines_o4.csv", rep["baselines"])
     _write_csv(tables / "runs_labelled.csv", list(data["runs"].values()))
     _write_csv(tables / "accuracy_by_location.csv", rep["by_location"])
+    _write_csv(tables / "module_comparison.csv", rep["modules"])
+    _write_csv(tables / "paired_tests.csv", rep["paired_tests"])
     _write_csv(tables / "excluded_fields.csv", rep["excluded_fields"])
     _write_csv(tables / "field_records.csv", data["records"])
 
+    from .figures import write_figures
+
+    rep["figures"] = write_figures(rep, data, out_dir / "figures")
+    with open(out_dir / "summary.json", "w", encoding="utf-8") as fh:
+        json.dump(rep, fh, indent=2, ensure_ascii=False, default=str)
     (out_dir / "report.md").write_text(render_markdown(rep), encoding="utf-8")
     return rep
 
@@ -638,6 +727,10 @@ def render_markdown(rep: dict) -> str:
              f"{c.get('repetitions_completed', 'n/a')}"
              + (f" (study design: {planned} planned)" if planned else "")
              + f"; {c['runs']} runs, {c['records']} field records, {c['change_events']} change events.  ")
+    if c.get("baseline_labels_by_source"):
+        L.append("Baseline labels by source: " + ", ".join(
+            f"{k} {v}" for k, v in sorted(c["baseline_labels_by_source"].items()))
+            + f"; unlabelled field decisions (not scored): {c.get('unscored_decisions', 0)}.  ")
     if c.get("render_modes"):
         L.append("Snapshot render modes: " + ", ".join(f"{k} {v}" for k, v in sorted(c["render_modes"].items()))
                  + ".  ")
@@ -648,7 +741,32 @@ def render_markdown(rep: dict) -> str:
              f"{(env.get('git_commit') or 'n/a')[:10]}{' (dirty)' if env.get('git_dirty') else ''}, "
              f"tokenizer {env.get('tokenizer')}, prompt {env.get('prompt_version')}.\n")
 
-    L.append("## Table 5.1 — target metrics\n")
+    if rep.get("modules"):
+        L.append("## Module comparison\n")
+        L.append("All modules run on the same snapshots and the same seeded change sequences. "
+                 "Accuracy = correct field decisions / labelled field decisions; P/R/F1 are "
+                 "micro-averaged field decisions (lists: items). 't0' = original page, "
+                 "'changed' = steps 1..K. FPR = false alarms / non-degraded monitoring runs.\n")
+        L.append("| Module | Acc t0 | F1 t0 | Acc changed | P changed | R changed | F1 changed | "
+                 "F1 overall | Alarm FPR | Healing success | TTR median s | Run latency median ms |")
+        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+        for m in rep["modules"]:
+            L.append(f"| {m['module']} | {_pct(m['initial_accuracy'])} | {_pct(m['initial_f1'])} | "
+                     f"{_pct(m['changed_accuracy'])} | {_pct(m['changed_precision'])} | "
+                     f"{_pct(m['changed_recall'])} | {_pct(m['changed_f1'])} | {_pct(m['overall_f1'])} | "
+                     f"{_pct(m['alarm_false_positive_rate'])} | {_pct(m['healing_success_rate'])} | "
+                     f"{_num(m['ttr_median_s'])} | {_num(m['run_latency_median_ms'], 0)} |")
+        if rep.get("paired_tests"):
+            L.append("\nPaired per-site comparison of sustained F1:\n")
+            L.append("| A vs B | Sites | Mean diff | Wins/Ties/Losses | Sign test p | Wilcoxon p |")
+            L.append("|---|---|---|---|---|---|")
+            for t in rep["paired_tests"]:
+                L.append(f"| {t['a']} vs {t['b']} | {t['sites']} | {_pct(t['mean_diff'])} | "
+                         f"{t['wins']}/{t['ties']}/{t['losses']} | {_num(t['sign_test_p'], 4)} | "
+                         f"{_num(t['wilcoxon_p'], 4)} |")
+        L.append("")
+
+    L.append("## Table 5.1 — target metrics (LLM-based self-healing)\n")
     L.append("| Metric | Value | Target | Met |\n|---|---|---|---|")
     for row in rep["table_5_1"]:
         v = row["value"]
@@ -709,11 +827,12 @@ def render_markdown(rep: dict) -> str:
         L.append(f"Per-site sustained F1 difference: mean {_pct(p['mean_diff'])}; "
                  f"wins/ties/losses {p['wins']}/{p['ties']}/{p['losses']}; "
                  f"sign test p={_num(p['sign_test_p'], 4)}; Wilcoxon p={_num(p['wilcoxon_p'], 4)}.\n")
-    L.append("| Site | Category | Initial F1 | Sustained F1 (self-healing) | Sustained F1 (static) |")
-    L.append("|---|---|---|---|---|")
+    conds = rep.get("conditions_run") or ["self_healing", "static"]
+    L.append("| Site | Category | " + " | ".join(f"{c} t0 F1 | {c} sustained F1" for c in conds) + " |")
+    L.append("|---|---|" + "---|---|" * len(conds))
     for s in rep["per_site"]:
-        L.append(f"| {s['site']} | {s['category']} | {_pct(s['initial_f1'])} | "
-                 f"{_pct(s['self_healing_sustained_f1'])} | {_pct(s.get('static_sustained_f1'))} |")
+        L.append(f"| {s['site']} | {s['category']} | " + " | ".join(
+            f"{_pct(s.get(f'{c}_initial_f1'))} | {_pct(s.get(f'{c}_sustained_f1'))}" for c in conds) + " |")
     r5 = rep["rq5"]
     L.append(f"\nRQ5: {r5['sites_sustained_f1_ge_0_80']} of {r5['sites']} sites keep sustained F1 >= 80%.\n")
 

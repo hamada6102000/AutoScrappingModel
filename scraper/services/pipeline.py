@@ -321,8 +321,9 @@ class ScrapePipeline:
         result = None
         start = time.perf_counter()
         try:
-            result = self.provider.generate_xpaths(self._page.llm_view, specs,
-                                                   failure_history=hints or None)
+            view = (self._page.clean_html if getattr(self.provider, "wants_clean_dom", False)
+                    else self._page.llm_view)
+            result = self.provider.generate_xpaths(view, specs, failure_history=hints or None)
         except RateLimitExhausted as exc:
             if self.raise_on_quota:
                 raise
@@ -348,7 +349,7 @@ class ScrapePipeline:
                 result = LLMResult(xpaths={}, model=getattr(self.provider, "model", ""))
 
         latency = result.latency_ms or max(0, elapsed_ms - result.rate_limit_wait_ms)
-        is_llm = used.name != "heuristic"
+        is_llm = used.name not in ("heuristic", "rule_based")
         cost = self._cost(result.model, result.prompt_tokens, result.completion_tokens) if is_llm else None
         log = LLMCallLog.objects.create(
             run=run,
@@ -409,7 +410,8 @@ class ScrapePipeline:
 
     def _validate_and_store(self, fields, xpaths, purpose, dom_signature, log):
         start = time.perf_counter()
-        source = RuleSource.HEURISTIC if log.provider == "heuristic" else RuleSource.LLM
+        source = {"heuristic": RuleSource.HEURISTIC,
+                  "rule_based": RuleSource.RULE_BASED}.get(log.provider, RuleSource.LLM)
         valid, invalid = {}, []
         for f in fields:
             xp = (xpaths.get(f.name) or "").strip()
@@ -464,7 +466,27 @@ class ScrapePipeline:
             hints.append(h)
             if len(hints) >= self.memory_size:
                 break
+        last = self._last_values(target, names)
+        for h in hints:
+            h.last_value = last.get(h.field_name, "")
         return hints
+
+    def _last_values(self, target, names) -> dict:
+        """Value of each field in the latest earlier completed run (for
+        value-anchored repair by the rule-based provider)."""
+        prev = (target.runs.exclude(pk=self._run.pk).filter(completed=True)
+                .order_by("-started_at", "-id").first())
+        if prev is None:
+            return {}
+        out = {}
+        for rec in prev.records.filter(phase=RecordPhase.FINAL, success=True,
+                                       field__name__in=names).select_related("field"):
+            if rec.field.cardinality == "many":
+                vals = rec.values or []
+                out[rec.field.name] = str(vals[0]) if vals else ""
+            else:
+                out[rec.field.name] = rec.raw_value
+        return out
 
     def _record_failures(self, outcomes) -> None:
         for o in outcomes:

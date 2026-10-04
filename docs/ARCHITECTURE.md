@@ -125,13 +125,26 @@ cannot be recovered (the run ends **Degraded**). If the LLM fails, ordinary runs
 may fall back to the heuristic for that call, always flagged; the evaluation
 disables fallback.
 
+## Rule-based self-healing module (`llm/rule_based.py`)
+
+A deterministic selector writer behind the same `LLMProvider` interface, used
+as the non-LLM self-healing baseline. It reads the full cleaned DOM and, per
+field, tries: value anchoring (repair only: find the value extracted in the
+previous run and write a locator for its new element), label anchoring
+(`//th[normalize-space()="Tax"]/following-sibling::td[1]`), class/id/microdata
+tokens, type conventions (`h1`, `time/@datetime`) and the page-metadata block.
+Failed selectors from the failure memory are never reused. Detection,
+threshold and attempt limit are the pipeline's, identical to the LLM module.
+
 ## Evaluation harness (`scraper/evaluation/`)
 
 `config.py` validates `eval/sites.yaml`. `protocol.py` runs the paired,
 cumulative, seeded design described in `docs/EVALUATION.md`: one DB transaction
 per run, with a clean stop and resume when the LLM quota is exhausted.
 `gt_io.py` handles ground-truth sheets, `metrics.py` holds pure metric
-definitions, `report.py` builds Table 5.1 and RQ1–RQ5, `export.py` writes the
+definitions, `report.py` builds Table 5.1, RQ1–RQ5 and the module comparison,
+`figures.py` draws the paper figures, `verify.py` re-computes every number
+independently, `paper.py` writes the results text, `export.py` writes the
 results bundle, and `baselines.py` scores external systems' predictions.
 
 ## Data model

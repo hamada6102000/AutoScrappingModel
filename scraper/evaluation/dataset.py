@@ -577,7 +577,9 @@ def to_config(dataset: dict, *, name: str, repetitions: int, planned_repetitions
             "planned_repetitions": planned_repetitions,
             "seed": 20261004,
             "date_order": date_order,
-            "conditions": ["self_healing", "static"],
+            # Static (LLM selectors), static (rule selectors), rule-based and
+            # LLM-based self-healing, all on the same pages (see COND_INFO).
+            "conditions": ["self_healing", "static", "rule_based", "rule_static"],
             "fetch": {"user_agent": user_agent, "timeout": 45, "respect_robots": True,
                       "render": render},
             "list_correct_f1": 0.9,

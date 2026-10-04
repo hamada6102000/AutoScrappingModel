@@ -19,7 +19,7 @@ from .heuristic import HeuristicProvider
 
 logger = logging.getLogger(__name__)
 
-PROVIDERS = ("heuristic", "groq", "anthropic", "openai", "ollama")
+PROVIDERS = ("heuristic", "rule_based", "groq", "anthropic", "openai", "ollama")
 
 
 GROQ_OPTIONS = ("reasoning_effort", "include_reasoning", "tokens_per_minute",
@@ -36,6 +36,11 @@ def get_provider(name: str | None = None, model: str | None = None, **options) -
 
     if name == "heuristic":
         return HeuristicProvider()
+
+    if name == "rule_based":
+        from .rule_based import RuleBasedProvider
+
+        return RuleBasedProvider()
 
     if name == "groq":
         from .groq_provider import GroqProvider

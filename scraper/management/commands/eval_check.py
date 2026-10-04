@@ -14,7 +14,7 @@ import time
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from scraper.evaluation.cli import add_experiment_arg, get_experiment, pct
+from scraper.evaluation.cli import add_experiment_arg, get_experiment, pct, site_list
 from scraper.evaluation.protocol import baseline_snapshot, estimate, gt_status, make_provider
 from scraper.llm.base import FieldSpec
 from scraper.services import snapshots as snapstore
@@ -28,6 +28,10 @@ class Command(BaseCommand):
         add_experiment_arg(parser)
         parser.add_argument("--ping", action="store_true",
                             help="Verify the LLM: list models, one tiny call, rate limits.")
+        parser.add_argument("--conditions", help="Check readiness for this subset only "
+                            "(e.g. rule_based,rule_static needs no LLM).")
+        parser.add_argument("--allow-unlabelled", action="store_true",
+                            help="Unlabelled fields are reported but do not block (not scored).")
 
     def handle(self, *args, **opts):
         exp = get_experiment(opts["experiment"])
@@ -37,11 +41,14 @@ class Command(BaseCommand):
 
         if tokens.is_estimate():
             problems.append("exact tokenizer unavailable (tiktoken) - token counts would be estimates")
-        try:
-            provider = make_provider(e)
-        except Exception as exc:
-            provider = None
-            problems.append(f"LLM provider not usable: {exc}")
+        conditions = site_list(opts.get("conditions")) or e["conditions"]
+        provider = None
+        if "self_healing" in conditions:
+            try:
+                provider = make_provider(e)
+            except Exception as exc:
+                problems.append(f"LLM provider not usable: {exc}")
+        unscored = 0
 
         self.stdout.write(
             f"Experiment {exp.name}: {len(exp.config['sites'])} sites, {e['repetitions']} repetitions, "
@@ -71,7 +78,9 @@ class Command(BaseCommand):
                                 f"{site.get('expect_text')} (consent wall / bot check / unrendered?)")
             if snap.llm_view_truncated:
                 flags.append("LLM view truncated")
-            if missing:
+            if missing and opts["allow_unlabelled"]:
+                unscored += len(missing)
+            elif missing:
                 problems.append(f"{site['key']}: {len(missing)} unlabelled field(s): {', '.join(missing)}")
             for name, p in (snap.field_presence or {}).items():
                 if p.get("labelled_absent"):
@@ -96,6 +105,9 @@ class Command(BaseCommand):
             f"~{t['tokens_min']:,}-{t['tokens_max']:,} tokens (per call: planned prompt + completion "
             "budget; the upper bound assumes every step breaks and every heal needs all attempts).")
 
+        if unscored:
+            notes.append(f"{unscored} field(s) have no label and will not be scored (--allow-unlabelled)")
+        self.stdout.write(f"Conditions checked: {', '.join(conditions)}")
         if opts["ping"] and provider is not None:
             self._ping(exp, provider, llm, problems, notes)
 
@@ -106,7 +118,11 @@ class Command(BaseCommand):
             for p in problems:
                 self.stdout.write(self.style.ERROR(f"  - {p}"))
         else:
-            self.stdout.write(self.style.SUCCESS("\nREADY. Next: python manage.py eval_run"))
+            nxt = "python manage.py eval_run" + (f" --conditions {','.join(conditions)}"
+                                                 if set(conditions) != set(e["conditions"]) else "")
+            if opts["allow_unlabelled"]:
+                nxt += " --allow-unlabelled"
+            self.stdout.write(self.style.SUCCESS(f"\nREADY. Next: {nxt}"))
 
     # ------------------------------------------------------------------
     def _ping(self, exp, provider, llm, problems, notes):

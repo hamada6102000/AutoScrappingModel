@@ -67,6 +67,9 @@ class FailureHint:
     field_name: str
     failed_xpath: str
     reason: str
+    # Value the field had in the last successful run (used by the rule-based
+    # repairer for value anchoring; not part of the LLM prompt).
+    last_value: str = ""
 
 
 @dataclass

@@ -16,7 +16,21 @@ CATEGORIES = {"ecommerce", "news", "finance", "jobs", "academic", "other"}
 FIELD_TYPES = {"string", "number", "price", "date", "url", "mixed", "boolean"}
 RENDER_MODES = {"static", "js", "auto"}
 CARDINALITIES = {"single", "many"}
-CONDITIONS = {"self_healing", "static"}
+# The modules compared in the evaluation. "copy_of": the condition starts from
+# an exact copy of another condition's t0 selectors (paired design).
+COND_INFO = {
+    "static": {"label": "Static baseline (LLM-generated selectors)", "short": "Static (LLM sel.)",
+               "generator": "llm", "heal": False, "copy_of": "self_healing"},
+    "rule_static": {"label": "Static baseline (rule-generated selectors)", "short": "Static (rule sel.)",
+                    "generator": "rule_based", "heal": False, "copy_of": "rule_based"},
+    "rule_based": {"label": "Rule-based self-healing", "short": "Rule-based SH",
+                   "generator": "rule_based", "heal": True, "copy_of": None},
+    "self_healing": {"label": "LLM-based self-healing", "short": "LLM-based SH",
+                     "generator": "llm", "heal": True, "copy_of": None},
+}
+CONDITION_ORDER = ["static", "rule_static", "rule_based", "self_healing"]
+CONDITIONS = set(COND_INFO)
+OFFLINE_CONDITIONS = {"rule_based", "rule_static"}   # never call an LLM
 
 DEFAULT_STEPS = [
     {"op": "rename_classes", "focus": True},
@@ -126,8 +140,13 @@ def resolve(data: dict, base_dir: Path | None = None) -> dict:
         if not isinstance(value, (int, float)) or not lo <= value <= hi:
             problems.append(f"experiment.{key} must be between {lo} and {hi}")
     conditions = exp.get("conditions") or []
-    if "self_healing" not in conditions or not set(conditions) <= CONDITIONS:
-        problems.append("experiment.conditions must include self_healing (optionally static)")
+    if not conditions or not set(conditions) <= CONDITIONS:
+        problems.append(f"experiment.conditions must be a non-empty subset of {', '.join(CONDITION_ORDER)}")
+    for c in conditions:
+        src = (COND_INFO.get(c) or {}).get("copy_of")
+        if src and src not in conditions:
+            problems.append(f"experiment.conditions: {c} copies the t0 selectors of {src}, so {src} "
+                            "must be listed too")
     protocol = exp.get("protocol") or {}
     for i, step in enumerate(protocol.get("steps") or []):
         if not isinstance(step, dict) or step.get("op") not in ALL_OPS:

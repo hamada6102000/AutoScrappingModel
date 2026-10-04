@@ -40,7 +40,7 @@ from ..services.fetcher import fetch_raw, robots_allowed
 from ..services.htmlutil import decode_html
 from ..services.mutations import apply_mutation, family
 from ..services.pipeline import RunContext, ScrapePipeline
-from .config import site_by_key
+from .config import COND_INFO, CONDITION_ORDER, site_by_key
 from .environment import capture
 
 BASELINE_LABEL = "baseline"
@@ -363,31 +363,51 @@ def build_schedule(exp_cfg: dict, site_key: str, rep: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 class EvaluationRunner:
     def __init__(self, exp: Experiment, *, write=None, max_llm_calls: int | None = None,
-                 sites: list[str] | None = None, provider=None):
+                 sites: list[str] | None = None, provider=None, conditions: list[str] | None = None,
+                 allow_unlabelled: bool = False, skip_unavailable: bool = False):
         self.exp = exp
         self.cfg = exp.config
         self.ecfg = self.cfg["experiment"]
         self.write = write or (lambda msg: print(msg, file=sys.stdout))
         self.max_llm_calls = max_llm_calls
         self.calls_made = 0
+        self.allow_unlabelled = allow_unlabelled
         self.site_keys = sites or [s["key"] for s in self.cfg["sites"]]
-        llm = self.ecfg["llm"]
+        self.skipped_sites = []
+        if skip_unavailable:
+            self.skipped_sites = [k for k in self.site_keys if baseline_snapshot(exp, k) is None]
+            self.site_keys = [k for k in self.site_keys if k not in self.skipped_sites]
+        configured = self.ecfg["conditions"]
+        wanted = conditions or configured
+        unknown = [c for c in wanted if c not in configured]
+        if unknown:
+            raise EvalError(f"conditions {unknown} are not in the experiment ({', '.join(configured)})")
+        self.conditions = [c for c in CONDITION_ORDER if c in wanted]
         configure(exp)
-        self.provider = provider or make_provider(self.ecfg)
+        # The LLM is only needed when the LLM-based module generates or heals.
+        self.provider = None
+        if "self_healing" in self.conditions:
+            self.provider = provider or make_provider(self.ecfg)
+        from ..llm.rule_based import RuleBasedProvider
+
+        rules = RuleBasedProvider()
         common = dict(
-            provider=self.provider,
-            allow_fallback=False,          # never mix heuristic into LLM results
+            allow_fallback=False,          # never mix providers within a condition
             threshold=self.ecfg["health_threshold"],
             max_attempts=self.ecfg["max_heal_attempts"],
             memory_size=self.ecfg["failure_memory_size"],
             raise_on_quota=True,
             save_snapshots=False,
         )
-        self.pipelines = {
-            "self_healing": ScrapePipeline(heal_enabled=True, **common),
-            "static": ScrapePipeline(heal_enabled=False, generate_missing=False, **common),
-        }
-        self.stats = {"runs": 0, "skipped": 0, "llm_calls": 0}
+        self.pipelines = {}
+        for cond in self.conditions:
+            info = COND_INFO[cond]
+            prov = rules if info["generator"] == "rule_based" else (self.provider or rules)
+            self.pipelines[cond] = ScrapePipeline(
+                provider=prov, heal_enabled=info["heal"],
+                generate_missing=info["copy_of"] is None, **common)
+        self.stats = {"runs": 0, "skipped": 0, "llm_calls": 0, "rule_calls": 0, "waiting": [],
+                      "sites_without_snapshot": self.skipped_sites}
 
     # -- public -----------------------------------------------------------
     def run(self, natural: bool = False) -> dict:
@@ -425,28 +445,43 @@ class EvaluationRunner:
                 problems.append(f"{key}: no baseline snapshot (run eval_snapshot)")
                 continue
             missing, _ = gt_status(snap, site)
-            if missing:
+            if missing and not self.allow_unlabelled:
                 problems.append(f"{key}: ground truth missing for {', '.join(missing)} (run eval_gt_import)")
         return problems
 
+    def _start(self, site: dict, rep: int, base, natural: bool = False) -> dict:
+        """t0 for every selected condition: generators first, then the static
+        conditions start from an exact copy of their generator's t0 rules."""
+        targets = {c: ensure_target(self.exp, site, c, rep) for c in self.conditions}
+        for cond in self.conditions:
+            if COND_INFO[cond]["copy_of"] is None:
+                self._run_step(targets[cond], base, 0, StepKind.BASELINE, None, {})
+        for cond in list(self.conditions):
+            src = COND_INFO[cond]["copy_of"]
+            if src is None:
+                continue
+            src_target = targets.get(src) or ensure_target(self.exp, site, src, rep)
+            if not src_target.runs.filter(step=0, completed=True).exists():
+                note = f"{site['key']} r{rep}: {cond} waits for the t0 selectors of {src}"
+                self.stats["waiting"].append(note)
+                self.write(f"  {note}")
+                targets.pop(cond)
+                continue
+            self._copy_t0_rules(src_target, targets[cond])
+            self._run_step(targets[cond], base, 0, StepKind.BASELINE, None, {})
+        return targets
+
     def run_site_rep(self, site: dict, rep: int) -> None:
-        conditions = self.ecfg["conditions"]
-        targets = {c: ensure_target(self.exp, site, c, rep) for c in conditions}
         base = baseline_snapshot(self.exp, site["key"])
-
-        self._run_step(targets["self_healing"], base, 0, StepKind.BASELINE, None, {})
-        if "static" in targets:
-            self._copy_t0_rules(targets["self_healing"], targets["static"])
-            self._run_step(targets["static"], base, 0, StepKind.BASELINE, None, {})
-
+        targets = self._start(site, rep, base)
         parent = base
         for k, spec in enumerate(build_schedule(self.ecfg, site["key"], rep), start=1):
             snap = self._simulated_snapshot(site, rep, k, parent, spec)
             fam = family(spec["op"])
             kind = {"structural": StepKind.STRUCTURAL, "content": StepKind.CONTENT,
                     "control": StepKind.CONTROL}[fam]
-            for cond in conditions:
-                self._run_step(targets[cond], snap, k, kind, fam == "structural", snap.mutation)
+            for cond, target in targets.items():
+                self._run_step(target, snap, k, kind, fam == "structural", snap.mutation)
             parent = snap
 
     def run_natural(self, site: dict) -> None:
@@ -457,21 +492,16 @@ class EvaluationRunner:
         if not naturals:
             self.write(f"  {site['key']}: no natural snapshots; skipped")
             return
-        conditions = self.ecfg["conditions"]
-        targets = {c: ensure_target(self.exp, site, c, NATURAL_REP) for c in conditions}
-        self._run_step(targets["self_healing"], base, 0, StepKind.BASELINE, None, {})
-        if "static" in targets:
-            self._copy_t0_rules(targets["self_healing"], targets["static"])
-            self._run_step(targets["static"], base, 0, StepKind.BASELINE, None, {})
+        targets = self._start(site, NATURAL_REP, base, natural=True)
         for k, snap in enumerate(naturals, start=1):
             missing, _ = gt_status(snap, site)
-            if missing:
+            if missing and not self.allow_unlabelled:
                 self.write(f"  {site['key']} {snap.label}: ground truth missing for "
                            f"{', '.join(missing)}; natural chain stopped here")
                 return
             changed = (snap.mutation or {}).get("layout_changed")
-            for cond in conditions:
-                self._run_step(targets[cond], snap, k, StepKind.NATURAL, changed,
+            for cond, target in targets.items():
+                self._run_step(target, snap, k, StepKind.NATURAL, changed,
                                {"op": "natural", "label": snap.label}, natural=True)
 
     # -- internals ---------------------------------------------------------
@@ -545,15 +575,19 @@ class EvaluationRunner:
             raise QuotaStop(str(exc), getattr(exc, "retry_after", None)) from exc
         except ProviderUnavailable as exc:
             raise ProviderStop(str(exc), exc.retryable) from exc
-        self.calls_made += run.llm_calls_count
+        uses_llm = COND_INFO[target.condition]["generator"] == "llm"
+        if uses_llm:
+            self.calls_made += run.llm_calls_count
+            self.stats["llm_calls"] += run.llm_calls_count
+        else:
+            self.stats["rule_calls"] += run.llm_calls_count
         self.stats["runs"] += 1
-        self.stats["llm_calls"] += run.llm_calls_count
         op = (mutation or {}).get("op", "baseline")
         pre = run.pre_heal_health if run.pre_heal_health is not None else run.health_score
         self.write(
-            f"  {target.site_key:<18} r{target.repetition} s{step:02d} {target.condition:<12} "
+            f"  {target.site_key:<10} r{target.repetition} s{step:02d} {target.condition:<12} "
             f"{op:<16} {run.status:<9} health {pre:.2f}->{run.health_score:.2f}  "
-            f"LLM calls {run.llm_calls_count}"
+            f"{'LLM' if uses_llm else 'rule'} calls {run.llm_calls_count}"
         )
 
 

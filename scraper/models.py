@@ -43,6 +43,7 @@ class Cardinality(models.TextChoices):
 
 class RuleSource(models.TextChoices):
     HEURISTIC = "heuristic", "Heuristic"
+    RULE_BASED = "rule_based", "Rule-based"
     LLM = "llm", "LLM"
     HUMAN = "human", "Human"
 
@@ -84,8 +85,10 @@ class Condition:
     """Experimental conditions (free-text field; these are the standard ones)."""
 
     LIVE = ""                      # ordinary (non-experiment) runs
-    SELF_HEALING = "self_healing"  # proposed system
+    SELF_HEALING = "self_healing"  # proposed system: LLM-based self-healing
     STATIC = "static"              # same LLM rules, healing disabled (RQ3)
+    RULE_BASED = "rule_based"      # rule-based generation and self-healing (no LLM)
+    RULE_STATIC = "rule_static"    # same rule-based rules, healing disabled
     BASELINE_PREFIX = "baseline:"  # imported external baselines (O4)
 
 
@@ -107,6 +110,7 @@ class SnapshotKind(models.TextChoices):
 
 class GTSource(models.TextChoices):
     HUMAN = "human", "Human-verified"
+    DATASET = "dataset", "Annotated dataset value found verbatim on the snapshot"
     DERIVED = "derived", "Derived (text preserved by construction)"
     PERTURBED = "perturbed", "Updated by construction (content perturbation)"
 

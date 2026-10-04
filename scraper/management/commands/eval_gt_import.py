@@ -22,6 +22,15 @@ class Command(BaseCommand):
         add_experiment_arg(parser)
         parser.add_argument("--file", required=True)
         parser.add_argument("--verified-by", default="", help="Default verifier name/initials.")
+        parser.add_argument("--only-status",
+                            help="Pre-filled sheet only: import just these prefill_status values, "
+                                 "e.g. found,list-complete (recorded values found verbatim).")
+        parser.add_argument("--keep-existing", action="store_true",
+                            help="Never overwrite a label that is already imported.")
+        parser.add_argument("--source", choices=["human", "dataset"], default="human",
+                            help="How the labels were obtained: human (checked on the labeling "
+                                 "view) or dataset (annotated dataset values matched verbatim, "
+                                 "not yet reviewed).")
 
     def handle(self, *args, **opts):
         exp = get_experiment(opts["experiment"])
@@ -29,12 +38,17 @@ class Command(BaseCommand):
         if not path.exists():
             raise CommandError(f"File not found: {path}")
         try:
-            rep = import_ground_truth(exp, path, opts["verified_by"])
+            only = {x.strip() for x in opts["only_status"].split(",")} if opts.get("only_status") else None
+            rep = import_ground_truth(exp, path, opts["verified_by"], only_status=only,
+                                      source=opts["source"], keep_existing=opts["keep_existing"])
         except ValueError as exc:
             raise CommandError(str(exc)) from exc
         self.stdout.write(self.style.SUCCESS(
             f"Imported {rep['imported']} labels ({rep['absent']} marked {'<ABSENT>'}); "
-            f"{rep['empty']} rows still empty."))
+            f"{rep['empty']} rows still empty"
+            + (f"; {rep['skipped_status']} rows skipped by --only-status" if rep.get("skipped_status") else "")
+            + (f"; {rep['kept_existing']} existing labels kept" if rep.get("kept_existing") else "")
+            + "."))
         for err in rep["errors"]:
             self.stdout.write(self.style.ERROR(f"  ERROR {err}"))
         for warn in rep["warnings"]:

@@ -31,6 +31,14 @@ class Command(BaseCommand):
         parser.add_argument("--wait", action="store_true",
                             help="When the LLM quota is exhausted, sleep until the provider's "
                                  "suggested time and resume automatically.")
+        parser.add_argument("--conditions",
+                            help="Comma-separated subset to run now, e.g. rule_based,rule_static "
+                                 "(no LLM needed). Default: all conditions of the experiment.")
+        parser.add_argument("--allow-unlabelled", action="store_true",
+                            help="Run even if some fields have no ground-truth label; those "
+                                 "fields are scraped but not scored (reported as unscored).")
+        parser.add_argument("--skip-unavailable", action="store_true",
+                            help="Skip (and list) sites whose page could not be saved.")
         parser.add_argument("--max-hours", type=float, default=72.0,
                             help="With --wait: give up after this many hours (default 72).")
 
@@ -61,7 +69,10 @@ class Command(BaseCommand):
         while True:
             try:
                 runner = EvaluationRunner(exp, write=self.stdout.write,
-                                          max_llm_calls=opts["max_llm_calls"], sites=sites)
+                                          max_llm_calls=opts["max_llm_calls"], sites=sites,
+                                          conditions=site_list(opts.get("conditions")),
+                                          allow_unlabelled=opts["allow_unlabelled"],
+                                          skip_unavailable=opts["skip_unavailable"])
             except Exception as exc:
                 raise CommandError(f"Cannot start: {exc}") from exc
             try:
@@ -86,8 +97,14 @@ class Command(BaseCommand):
             time.sleep(delay)
 
         self.stdout.write(self.style.SUCCESS(
-            f"\nDone this session: {stats['runs']} runs, {stats['llm_calls']} LLM calls "
+            f"\nDone this session: {stats['runs']} runs, {stats['llm_calls']} LLM calls, "
+            f"{stats.get('rule_calls', 0)} rule-based generator calls "
             f"({stats['skipped']} already completed runs skipped)."))
+        if stats.get("sites_without_snapshot"):
+            self.stdout.write(self.style.WARNING(
+                "  skipped (no saved page): " + ", ".join(stats["sites_without_snapshot"])))
+        for note in stats.get("waiting") or []:
+            self.stdout.write(self.style.WARNING(f"  waiting: {note}"))
         if stats.get("stopped"):
             self.stdout.write(self.style.WARNING(
                 f"Stopped early: {stats['stopped']}\nNothing is lost - re-run the same command later "

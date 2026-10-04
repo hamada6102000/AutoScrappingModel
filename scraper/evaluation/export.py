@@ -82,7 +82,19 @@ def export(exp, out_zip: Path, snapshots: str = "baseline") -> Path:
                                              "condition": F("run__condition"),
                                              "step": F("run__step")}))
 
-    report_mod.write(exp, work / "results")
+    rep = report_mod.write(exp, work / "results")
+    from .paper import results_latex, results_markdown
+    from .verify import verify
+
+    verify(exp, work / "results")
+    rep_json = json.loads((work / "results" / "summary.json").read_text(encoding="utf-8"))
+    (work / "results" / "paper_results.md").write_text(results_markdown(rep_json), encoding="utf-8")
+    (work / "results" / "paper_table_modules.tex").write_text(results_latex(rep_json), encoding="utf-8")
+    del rep
+    # audit of the saved pages against the annotated dataset, if one was made
+    audit_dir = snapstore.experiment_dir(exp) / "audit"
+    if audit_dir.exists():
+        shutil.copytree(audit_dir, work / "audit")
 
     if snapshots in ("baseline", "all"):
         qs = Snapshot.objects.filter(experiment=exp)

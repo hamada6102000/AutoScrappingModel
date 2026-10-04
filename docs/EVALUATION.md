@@ -58,6 +58,35 @@ as `<section id="page-metadata">` (JSON-LD as nested `div[@data-key]`), so an
 XPath can address them. The simulated layout changes do not touch this block,
 so the report also gives accuracy split by where values were read from.
 
+## 0b. Modules compared and the one-command run
+
+| Condition | Module | Selectors at t0 | Repair |
+|---|---|---|---|
+| `static` | Static baseline (LLM-generated selectors) | LLM | never |
+| `rule_static` | Static baseline (rule-generated selectors) | rule-based | never |
+| `rule_based` | Rule-based self-healing | rule-based | rule-based (value anchoring, label anchoring, attributes, type rules, structured data) |
+| `self_healing` | LLM-based self-healing (proposed) | LLM | LLM with failure memory |
+
+All four run on the same saved pages and the same seeded change sequences; the
+two static baselines start from an exact copy of their generator's t0
+selectors, so each self-healing module has a paired control. Detection,
+threshold, attempt limit and failure memory are identical for both healing
+modules; only the selector writer differs.
+
+```bat
+eval\evaluate.bat offline   &  rem rule-based modules only: no LLM, no quota
+eval\evaluate.bat           &  rem everything (LLM modules sleep through rate limits)
+```
+
+`evaluate.bat` imports, as labels, only your recorded dataset values that are
+found verbatim on the saved pages (label source `dataset`; labels you imported
+yourself are never overwritten). Fields without a label are scraped but not
+scored, and the report states how many. It ends with `eval_report` (tables
+and `figures/*.png`), `eval_verify` (independent re-computation of every
+metric, snapshot hashes, byte-identical re-creation of every simulated page),
+`eval_paper` (`paper_results.md`, `paper_table_modules.tex`) and
+`export_results`.
+
 ## 1. What the evaluation does
 
 For each site and each repetition (3 by default):
