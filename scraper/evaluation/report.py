@@ -492,6 +492,68 @@ def scope_of(chains: set) -> dict:
             "chains": len(chains)}
 
 
+REPLICATED_KEYS = ("initial_accuracy", "initial_f1", "changed_accuracy", "changed_precision",
+                   "changed_recall", "changed_f1", "overall_f1", "healing_success_rate")
+
+
+def llm_replication(data, exp, own_chains, module_conds, modules, decision) -> dict:
+    """The LLM-module values measured on the LLM sites, replicated to every
+    other configured site, every value labelled with its origin. The decision
+    is the experiment's recorded LLM scope (eval_llm_scope). Nothing here is
+    a measurement on the other sites, nothing is written to the database, and
+    no statistical test uses these rows."""
+    by_cond = {m["condition"]: m for m in modules}
+    llm_conds = [c for c in module_conds if COND_INFO[c]["generator"] == "llm"]
+    source_sites = sorted({s for c in llm_conds for s, _ in own_chains[c]})
+    decided = set(decision["llm_sites"])
+    origin = f"replicated from {' + '.join(source_sites)} (pooled; not measured on this site)"
+    cats = {b["site"]: b["category"] for b in data["baselines"]}
+    keys = [s["key"] for s in exp.config["sites"]]
+    rows, replicated_sites = [], []
+    for site in keys:
+        row = {"site": site, "category": cats.get(site, "")}
+        for c in module_conds:
+            chains = {x for x in own_chains[c] if x[0] == site}
+            if chains:
+                vals, how = module_rows(restrict(data, chains), [c])[0], "measured"
+            elif c in llm_conds and site not in decided and source_sites:
+                vals, how = by_cond[c], origin
+                if site not in replicated_sites:
+                    replicated_sites.append(site)
+            else:
+                vals, how = None, ("not finished" if c in llm_conds and site in decided else "not run")
+            row[f"{c}_origin"] = how
+            for k in REPLICATED_KEYS:
+                if k == "healing_success_rate" and not COND_INFO[c]["heal"]:
+                    continue
+                row[f"{c}_{k}"] = vals.get(k) if vals else None
+        rows.append(row)
+    view = []
+    for m in modules:
+        m2 = dict(m)
+        if m["condition"] in llm_conds:
+            m2.update(sites_measured=m["sites"], sites_replicated=len(replicated_sites),
+                      sites=m["sites"] + len(replicated_sites),
+                      value_origin=(f"measured on {', '.join(m['site_keys'])}; the same values replicated to "
+                                    f"{len(replicated_sites)} other site(s)"))
+        else:
+            m2.update(sites_measured=m["sites"], sites_replicated=0, value_origin="measured")
+        view.append(m2)
+    return {
+        "enabled": True,
+        "decision": decision,
+        "source_sites": source_sites,
+        "replicated_sites": replicated_sites,
+        "rule": ("For every LLM-based module, each site outside the LLM sites receives that module's values "
+                 "measured on the LLM sites (pooled over their field decisions); the replicated rows therefore "
+                 "equal the measured LLM result, and the LLM module rows over all sites equal the measured "
+                 "values. Replicated values are not measurements, are not stored as runs, and are excluded "
+                 "from every statistical test."),
+        "per_site": rows,
+        "modules": view,
+    }
+
+
 def build(exp) -> dict:
     data = collect(exp)
     label_breaking(data)
@@ -517,6 +579,9 @@ def build(exp) -> dict:
     like_for_like = module_rows(compared, module_conds) if chains else []
     for row in like_for_like:
         row.update({k: v for k, v in scope_of(chains).items() if k != "sites"})
+    from . import llm_scope as scope_mod
+
+    decision = scope_mod.load(exp)
     llm_conds = [c for c in module_conds if COND_INFO[c]["generator"] == "llm"]
     llm_sites = sorted({s for c in llm_conds for s, _ in own_chains[c]})
     rule_sites = sorted({s for c in module_conds if c not in llm_conds for s, _ in own_chains[c]})
@@ -531,7 +596,19 @@ def build(exp) -> dict:
                  f"next to the rule-based modules, which were executed on {len(rule_sites)} sites. No LLM output "
                  "exists for the other sites and no LLM value is copied to them."
                  if llm_conds and len(llm_sites) < len(exp.config["sites"]) else ""),
+        "decision": decision,
+        "reason": (decision or {}).get("reason", ""),
     }
+    replication = None
+    if decision and decision["replicate_to_all_sites"] and llm_conds:
+        replication = llm_replication(data, exp, own_chains, module_conds, modules, decision)
+        n_rep = len(replication["replicated_sites"])
+        llm_scope["note"] = (
+            f"The LLM-based modules were executed on {len(llm_sites)} of {len(exp.config['sites'])} sites "
+            f"({', '.join(llm_sites)}); the values measured there were replicated to the other {n_rep} sites. "
+            "Replicated values are not measurements: no LLM call was made for those sites, no run is stored "
+            "for them, and they are excluded from all statistical tests. The rule-based modules were executed "
+            f"on {len(rule_sites)} sites.")
     initial = M.aggregate(_recs(data, condition="self_healing", step=0))
     sustained = {c: M.aggregate(_recs(data, condition=c)) for c in ecfg["conditions"]}
     healing = healing_section(data)
@@ -741,6 +818,7 @@ def build(exp) -> dict:
         "module_chains": {c: sorted(own_chains[c]) for c in module_conds},
         "module_repetitions": {c: sorted({r for _, r in own_chains[c]}) for c in module_conds},
         "llm_scope": llm_scope,
+        "llm_replication": replication,
         "modules": modules,
         "modules_like_for_like": like_for_like,
         "paired_tests": tests,
@@ -804,8 +882,11 @@ def write(exp, out_dir: Path, llm_scope_reason: str = "") -> dict:
     tables.mkdir(parents=True, exist_ok=True)
     rep = build(exp)
     data = rep.pop("_data")
-    if rep["llm_scope"].get("reduced"):
+    if rep["llm_scope"].get("reduced") and llm_scope_reason.strip():
         rep["llm_scope"]["reason"] = llm_scope_reason.strip()
+    if rep["llm_scope"].get("decision"):
+        (out_dir / "llm_scope_decision.json").write_text(
+            json.dumps(rep["llm_scope"]["decision"], indent=2, ensure_ascii=False), encoding="utf-8")
 
     with open(out_dir / "summary.json", "w", encoding="utf-8") as fh:
         json.dump(rep, fh, indent=2, ensure_ascii=False, default=str)
@@ -824,6 +905,9 @@ def write(exp, out_dir: Path, llm_scope_reason: str = "") -> dict:
     _write_csv(tables / "accuracy_by_location.csv", rep["by_location"])
     _write_csv(tables / "module_comparison.csv", rep["modules"])
     _write_csv(tables / "module_comparison_like_for_like.csv", rep["modules_like_for_like"])
+    if rep.get("llm_replication"):
+        _write_csv(tables / "module_comparison_with_llm_replication.csv", rep["llm_replication"]["modules"])
+        _write_csv(tables / "per_site_with_llm_replication.csv", rep["llm_replication"]["per_site"])
     _write_csv(tables / "paired_tests.csv", rep["paired_tests"])
     _write_csv(tables / "excluded_fields.csv", rep["excluded_fields"])
     _write_csv(tables / "field_records.csv", data["records"])
@@ -880,14 +964,21 @@ def render_markdown(rep: dict) -> str:
                      "F1 changed | F1 overall | Alarm FPR | Healing success | TTR median s | Run latency median ms |")
             L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
             for m in rows:
-                L.append(f"| {m['module']} | {m['sites']} | {m.get('chains', 'n/a')} | "
+                sites = (f"{m['sites_measured']} measured + {m['sites_replicated']} replicated"
+                         if m.get("sites_replicated") else str(m["sites"]))
+                L.append(f"| {m['module']} | {sites} | {m.get('chains', 'n/a')} | "
                          f"{_pct(m['initial_accuracy'])} | {_pct(m['initial_f1'])} | "
                          f"{_pct(m['changed_accuracy'])} | {_pct(m['changed_precision'])} | "
                          f"{_pct(m['changed_recall'])} | {_pct(m['changed_f1'])} | {_pct(m['overall_f1'])} | "
                          f"{_pct(m['alarm_false_positive_rate'])} | {_pct(m['healing_success_rate'])} | "
                          f"{_num(m['ttr_median_s'])} | {_num(m['run_latency_median_ms'], 0)} |")
 
-        table(rep["modules"])
+        repl = rep.get("llm_replication")
+        if repl:
+            L.append("LLM rows: the values measured on " + ", ".join(repl["source_sites"]) + " are replicated to "
+                     f"{len(repl['replicated_sites'])} other sites (Sites = measured + replicated; Chains = "
+                     "measured chains only). " + repl["rule"] + "\n")
+        table(repl["modules"] if repl else rep["modules"])
         ch = rep.get("comparison_chains")
         like = rep.get("modules_like_for_like") or []
         if like and ch is not None and any(m.get("chains") != len(ch) for m in rep["modules"]):
@@ -895,9 +986,21 @@ def render_markdown(rep: dict) -> str:
                      f"completed ({', '.join(sorted({c[0] for c in ch}))}; repetition(s) "
                      f"{', '.join(str(r) for r in sorted({c[1] for c in ch}))}).\n")
             table(like)
+        if repl:
+            conds = rep.get("conditions_run") or []
+            L.append("\nPer site (sustained F1 = all steps; origin of each module's value):\n")
+            L.append("| Site | " + " | ".join(f"{COND_INFO[c]['short']} F1 | origin" for c in conds) + " |")
+            L.append("|---|" + "---|---|" * len(conds))
+            for r in repl["per_site"]:
+                cells = []
+                for c in conds:
+                    o = r.get(f"{c}_origin", "")
+                    cells += [_pct(r.get(f"{c}_overall_f1")),
+                              "measured" if o == "measured" else ("replicated" if o.startswith("replicated") else o)]
+                L.append(f"| {r['site']} | " + " | ".join(cells) + " |")
         if rep.get("paired_tests"):
             L.append("\nPaired per-site comparison of sustained F1 (each pair on the chains both modules "
-                     "completed):\n")
+                     "completed; measured values only, replicated values are never tested):\n")
             L.append("| A vs B | Sites | Mean diff | Wins/Ties/Losses | Sign test p | Wilcoxon p |")
             L.append("|---|---|---|---|---|---|")
             for t in rep["paired_tests"]:

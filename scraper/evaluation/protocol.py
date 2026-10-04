@@ -443,6 +443,24 @@ class EvaluationRunner:
                 generate_missing=info["copy_of"] is None, **common)
         self.stats = {"runs": 0, "skipped": 0, "llm_calls": 0, "rule_calls": 0, "waiting": [],
                       "sites_without_snapshot": self.skipped_sites}
+        # Recorded LLM-scope decision: LLM-based modules only on these sites.
+        from . import llm_scope
+
+        scope = llm_scope.load(exp)
+        self.llm_sites = set(scope["llm_sites"]) if scope else None
+        if self.llm_sites is not None:
+            outside = [k for k in self.site_keys if k not in self.llm_sites]
+            llm_conds = [c for c in self.conditions if COND_INFO[c]["generator"] == "llm"]
+            if outside and llm_conds:
+                self.write(f"  LLM scope: {', '.join(llm_conds)} run on {', '.join(sorted(self.llm_sites))} "
+                           f"only; not run (no LLM call) on {len(outside)} other site(s).")
+
+    def conditions_for(self, site_key: str) -> list[str]:
+        """The selected conditions that may run on this site (the recorded
+        LLM scope keeps LLM-based modules off the other sites)."""
+        if self.llm_sites is None or site_key in self.llm_sites:
+            return list(self.conditions)
+        return [c for c in self.conditions if COND_INFO[c]["generator"] != "llm"]
 
     # -- public -----------------------------------------------------------
     def run(self, natural: bool = False) -> dict:
@@ -490,11 +508,12 @@ class EvaluationRunner:
     def _start(self, site: dict, rep: int, base, natural: bool = False) -> dict:
         """t0 for every selected condition: generators first, then the static
         conditions start from an exact copy of their generator's t0 rules."""
-        targets = {c: ensure_target(self.exp, site, c, rep) for c in self.conditions}
-        for cond in self.conditions:
+        conds = self.conditions_for(site["key"])
+        targets = {c: ensure_target(self.exp, site, c, rep) for c in conds}
+        for cond in conds:
             if COND_INFO[cond]["copy_of"] is None:
                 self._run_step(targets[cond], base, 0, StepKind.BASELINE, None, {})
-        for cond in list(self.conditions):
+        for cond in conds:
             src = COND_INFO[cond]["copy_of"]
             if src is None:
                 continue
@@ -512,6 +531,8 @@ class EvaluationRunner:
     def run_site_rep(self, site: dict, rep: int) -> None:
         base = baseline_snapshot(self.exp, site["key"])
         targets = self._start(site, rep, base)
+        if not targets:
+            return
         parent = base
         for k, spec in enumerate(build_schedule(self.ecfg, site["key"], rep), start=1):
             snap = self._simulated_snapshot(site, rep, k, parent, spec)

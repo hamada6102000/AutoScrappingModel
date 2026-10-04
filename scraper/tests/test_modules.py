@@ -319,3 +319,81 @@ class RepSubsetTests(TempDataDirMixin, TestCase):
         from scraper.evaluation.protocol import EvalError
         with self.assertRaises(EvalError):
             EvaluationRunner(exp, write=lambda m: None, reps=[3])
+
+
+class LLMScopeReplicationTests(TempDataDirMixin, TestCase):
+    """Recorded LLM scope: LLM modules only on the chosen sites; the report
+    replicates their measured values to the other sites, labelled."""
+
+    def test_scope_is_enforced_and_replication_is_labelled(self):
+        import json
+
+        from scraper.evaluation import report
+        from scraper.evaluation.paper import results_latex, results_markdown
+        from scraper.evaluation.verify import verify
+        exp = ModuleConditionTests.prepare(self, ["self_healing", "static", "rule_based", "rule_static"])
+        sites = ["shop-product", "news-article"]
+        EvaluationRunner(exp, write=lambda m: None, sites=sites, conditions=["rule_based", "rule_static"]).run()
+        before = {m["condition"]: m for m in report.build(exp)["modules"]}
+        out = io.StringIO()
+        call_command("eval_llm_scope", experiment="modules", llm_sites="shop-product",
+                     replicate_to_all_sites=True, reason="a decision of the project supervisor", stdout=out)
+        self.assertIn("LLM SCOPE", out.getvalue())
+        # all conditions requested on both sites: the LLM modules run on shop-product only
+        EvaluationRunner(exp, write=lambda m: None, sites=sites, provider=HeuristicProvider(), reps=[1]).run()
+        llm_sites = set(ScrapeRun.objects.filter(experiment=exp, condition__in=["self_healing", "static"])
+                        .values_list("target__site_key", flat=True))
+        self.assertEqual(llm_sites, {"shop-product"})
+
+        rep = report.build(exp)
+        repl = rep["llm_replication"]
+        n_sites = len(exp.config["sites"])
+        self.assertEqual(repl["source_sites"], ["shop-product"])
+        self.assertEqual(len(repl["replicated_sites"]), n_sites - 1)
+        mods = {m["condition"]: m for m in rep["modules"]}
+        view = {m["condition"]: m for m in repl["modules"]}
+        for c in ("self_healing", "static"):
+            self.assertEqual((view[c]["sites_measured"], view[c]["sites_replicated"]), (1, n_sites - 1))
+            self.assertEqual(view[c]["changed_f1"], mods[c]["changed_f1"])
+        for c in ("rule_based", "rule_static"):            # rule-based results unchanged, never replicated
+            self.assertEqual(view[c]["sites_replicated"], 0)
+            for key in ("initial_f1", "changed_f1", "overall_f1", "breaking_events"):
+                self.assertEqual(mods[c][key], before[c][key])
+        rows = {r["site"]: r for r in repl["per_site"]}
+        self.assertEqual(rows["shop-product"]["self_healing_origin"], "measured")
+        news = rows["news-article"]
+        self.assertTrue(news["self_healing_origin"].startswith("replicated from shop-product"))
+        self.assertEqual(news["self_healing_overall_f1"], mods["self_healing"]["overall_f1"])
+        self.assertEqual(news["rule_based_origin"], "measured")
+        self.assertFalse(any(r[f"{c}_origin"].startswith("replicated") for r in repl["per_site"]
+                             for c in ("rule_based", "rule_static")))
+        # statistical tests use measured values only
+        tests = {(t["a"], t["b"]): t for t in rep["paired_tests"]}
+        self.assertEqual(tests[("self_healing", "rule_based")]["sites"], 1)
+
+        res = verify(exp)
+        self.assertTrue(res["ok"], res["checks"])
+        names = " ".join(c["check"] for c in res["checks"])
+        self.assertIn("no LLM-based run exists outside the recorded LLM sites", names)
+        self.assertIn("replicated LLM values equal the measured LLM values", names)
+
+        rep.pop("_data", None)
+        rep = json.loads(json.dumps(rep, default=str))
+        text = results_markdown(rep)
+        self.assertIn("a decision of the project supervisor. The values measured on this website were "
+                      f"replicated to the remaining {n_sites - 1} websites", text)
+        self.assertIn("The replicated values are not measurements: no LLM call was made for those websites", text)
+        self.assertIn(f"1 measured + {n_sites - 1} replicated", text)
+        tex = results_latex(rep)
+        self.assertIn(f"their values replicated (not measured) to the other {n_sites - 1}", tex)
+        self.assertIn(f"1 (+{n_sites - 1} repl.)", tex)
+
+        # the written report: decision copied, replication tables exported
+        out_dir = Path(self._tmp) / "results"
+        report.write(exp, out_dir)
+        self.assertTrue((out_dir / "llm_scope_decision.json").exists())
+        self.assertTrue((out_dir / "tables" / "per_site_with_llm_replication.csv").exists())
+        md = (out_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn("replicated to", md)
+        call_command("eval_llm_scope", experiment="modules", clear=True, stdout=out)
+        self.assertIsNone(report.build(exp)["llm_replication"])

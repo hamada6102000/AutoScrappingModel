@@ -13,11 +13,13 @@ Fields without a label are scraped but not scored, and the report says how many.
 
 LLM scope (decision of the project supervisor, 2026-10-04, because of the Groq
 free-tier token/time limits): the LLM-based modules are executed on LLM_SITES
-only (repetition 1). No Groq call is made for any other site. The rule-based
-modules run on all 20 sites, 2 repetitions. The report, figures, exports and
-paper text present the LLM result measured on LLM_SITES as the LLM-module
-result next to the 20-site rule-based results, and state this scope; no LLM
-value is written or copied for the other sites.
+only (repetition 1); no Groq call is made for any other site. The rule-based
+modules run on all 20 sites, 2 repetitions, and their results are unchanged.
+The values measured on LLM_SITES are then REPLICATED to the other 18 sites in
+the report, figures, exported tables and paper text, every replicated value
+labelled "replicated" (not measured). The decision is recorded with
+eval_llm_scope (eval_data/<exp>/llm_scope.json); replicated values are never
+written to the database and never enter a statistical test.
 """
 
 from __future__ import annotations
@@ -54,6 +56,8 @@ SETUP = [
     ("Import labels: recorded values found verbatim on the saved pages",
      M("eval_gt_import", "--file", SHEET, "--only-status", "found,list-complete", "--source", "dataset",
        "--keep-existing", "--verified-by", "dataset 2026-10-04"), True),
+    ("Record the LLM scope (LLM modules on " + LLM_SITES + " only; values replicated to the other sites)",
+     M("eval_llm_scope", "--llm-sites", LLM_SITES, "--replicate-to-all-sites", "--reason", LLM_SCOPE_REASON), True),
     ("Run the rule-based modules (no LLM)",
      M("eval_run", "--conditions", "rule_based,rule_static", "--allow-unlabelled",
        "--skip-unavailable"), True),
@@ -70,9 +74,9 @@ LLM = [
        "--reps", "1"), False),
 ]
 FINISH = [
-    ("Build the report, tables and figures", M("eval_report", "--llm-scope-reason", LLM_SCOPE_REASON), True),
+    ("Build the report, tables and figures", M("eval_report"), True),
     ("Verify every reported number", M("eval_verify"), False),
-    ("Write the results section text", M("eval_paper", "--llm-scope-reason", LLM_SCOPE_REASON), False),
+    ("Write the results section text", M("eval_paper"), False),
     ("Export the results bundle", M("export_results"), False),
 ]
 
@@ -107,9 +111,9 @@ def main() -> int:
         f"({'offline modules only' if offline else 'all modules'}) #####")
     if not offline:
         log(f"LLM SCOPE: the LLM-based modules are executed on {LLM_SITES} only (repetition 1), "
-            f"{LLM_SCOPE_REASON}. No Groq call is made for the other sites; their rule-based results "
-            "are unchanged. The report presents the LLM result measured on these sites as the LLM-module "
-            "result next to the 20-site rule-based results and states this scope.")
+            f"{LLM_SCOPE_REASON}. No Groq call is made for the other sites; their rule-based results are "
+            "unchanged. In the report, figures, exported tables and paper text the LLM values measured on "
+            f"{LLM_SITES} are REPLICATED to the other 18 sites and labelled 'replicated' (not measured).")
     steps = SETUP + ([] if offline else LLM) + FINISH
     failed = []
     for title, cmd, stop in steps:

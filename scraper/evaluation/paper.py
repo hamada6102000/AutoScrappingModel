@@ -74,6 +74,24 @@ def scope_text(rep) -> str:
          f"{len(scope['llm_sites'])} of the {scope['configured_sites']} websites ({_sites(scope['llm_sites'])}; "
          f"repetition {', '.join(str(r) for r in reps)})")
     t += f", {scope['reason']}" if scope.get("reason") else ""
+    repl = rep.get("llm_replication")
+    if repl:
+        n = len(repl["replicated_sites"])
+        t += (f". The values measured on {'this website' if len(repl['source_sites']) == 1 else 'these websites'} "
+              f"were replicated to the remaining {n} websites: each of them is assigned the LLM-module values "
+              f"measured on {_sites(repl['source_sites'])} (pooled over their field decisions), so the LLM rows "
+              f"over all {scope['configured_sites']} websites equal the measured "
+              f"{len(repl['source_sites'])}-website result. The replicated values are not measurements: no "
+              "LLM call was made for those websites, and they are excluded from all statistical tests. "
+              f"The rule-based modules were executed and measured on {len(scope['rule_sites'])} websites")
+        if rule:
+            rr = sorted({r for m in rule for r in m.get("repetitions") or []})
+            t += f" (repetitions {', '.join(str(r) for r in rr)})"
+        t += ". "
+        if ch:
+            t += (f"For a like-for-like comparison, all modules are also reported on the {len(ch)} "
+                  f"site-repetition chain(s) every module completed ({_sites(sorted({x[0] for x in ch}))}). ")
+        return t
     t += (". The result measured on these websites is reported as the LLM-module result next to the "
           f"rule-based modules, which were executed on {len(scope['rule_sites'])} websites")
     if rule:
@@ -100,7 +118,9 @@ def _module_table(L, rows):
              "Median run latency (ms) |")
     L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for m in rows:
-        L.append(f"| {m['module']} | {m['sites']} | {m.get('chains', 'n/a')} | {_p(m['initial_accuracy'])} | "
+        sites = (f"{m['sites_measured']} measured + {m['sites_replicated']} replicated"
+                 if m.get("sites_replicated") else str(m["sites"]))
+        L.append(f"| {m['module']} | {sites} | {m.get('chains', 'n/a')} | {_p(m['initial_accuracy'])} | "
                  f"{_p(m['initial_f1'])} | {_p(m['changed_accuracy'])} | {_p(m['changed_precision'])} | "
                  f"{_p(m['changed_recall'])} | {_p(m['changed_f1'])} | {_p(m['alarm_false_positive_rate'])} | "
                  f"{_p(m['healing_success_rate'])} | {_n(m['ttr_median_s'])} | "
@@ -130,11 +150,16 @@ def results_markdown(rep: dict) -> str:
     if not mods:
         L.append("No module has been run yet.")
     else:
-        if reduced:
+        repl = rep.get("llm_replication")
+        if repl:
+            L.append("Sites = websites with measured values + websites with replicated LLM values; Chains = "
+                     "measured site-repetition chains. " + (rep.get("llm_scope") or {}).get("note", ""))
+            L.append("")
+        elif reduced:
             L.append("Each module on the websites it was executed on (Sites, Chains = site-repetition "
                      "chains). " + (rep.get("llm_scope") or {}).get("note", ""))
             L.append("")
-        _module_table(L, mods)
+        _module_table(L, repl["modules"] if repl else mods)
         L.append("")
         if reduced and like:
             L.append("Like-for-like: all modules on the same website(s) "
@@ -159,14 +184,17 @@ def results_markdown(rep: dict) -> str:
         for m in mods:
             if m["initial_f1"] is not None and m["changed_f1"] is not None:
                 delta = m["changed_f1"] - m["initial_f1"]
-                L.append(f"- {m['module']} ({m['sites']} website(s)): F1 {_p(m['initial_f1'])} on the original "
+                L.append(f"- {m['module']} ({m['sites']} website(s) measured"
+                         + (", values replicated to the others" if repl and COND_INFO[m["condition"]]["generator"]
+                            == "llm" else "") + f"): F1 {_p(m['initial_f1'])} on the original "
                          f"pages and {_p(m['changed_f1'])} after the changes "
                          f"({'+' if delta >= 0 else ''}{delta * 100:.1f} points); "
                          f"{m['scored_decisions']} scored field decisions.")
         tests = rep.get("paired_tests") or []
         if tests:
-            L += ["", "Paired per-site comparison of sustained F1 (each pair on the websites both modules "
-                  "were executed on; with very few websites the tests have little power):", ""]
+            L += ["", "Paired per-site comparison of sustained F1 (measured values only, each pair on the "
+                  "websites both modules were executed on; replicated values are never tested; with very few "
+                  "websites the tests have little power):", ""]
             for t in tests:
                 L.append(f"- {COND_INFO[t['a']]['label']} vs {COND_INFO[t['b']]['label']}: mean difference "
                          f"{_p(t['mean_diff'])} over {t['sites']} site(s), wins/ties/losses "
@@ -212,9 +240,13 @@ def results_latex(rep: dict) -> str:
     mods = rep.get("modules") or []
     scope = rep.get("llm_scope") or {}
 
+    def site_cell(m):
+        return (f"{m['sites_measured']} (+{m['sites_replicated']} repl.)" if m.get("sites_replicated")
+                else str(m["sites"]))
+
     def rows(ms):
         return "\n".join(
-            f"{m['module']} & {m['sites']} & {_tex(m['initial_f1'])} & {_tex(m['changed_precision'])} "
+            f"{m['module']} & {site_cell(m)} & {_tex(m['initial_f1'])} & {_tex(m['changed_precision'])} "
             f"& {_tex(m['changed_recall'])} & {_tex(m['changed_f1'])} & {_tex(m['changed_accuracy'])} "
             f"& {_tex(m['alarm_false_positive_rate'])} & {_tex(m['healing_success_rate'])} "
             f"& {_n(m['ttr_median_s']) if m['ttr_median_s'] is not None else '--'} \\\\"
@@ -229,13 +261,18 @@ def results_latex(rep: dict) -> str:
             f"{rows(ms)}\n\\hline\n\\end{{tabular}}\n\\end{{table*}}\n")
 
     caption = "Comparison of the scraping modules (field-level, \\%)"
-    if scope.get("reduced"):
+    repl = rep.get("llm_replication")
+    if repl:
+        caption += (f"; LLM-based modules executed on {len(repl['source_sites'])} of {scope['configured_sites']} "
+                    f"websites, their values replicated (not measured) to the other {len(repl['replicated_sites'])}; "
+                    f"rule-based modules measured on {len(scope['rule_sites'])}")
+    elif scope.get("reduced"):
         caption += (f"; LLM-based modules executed on {len(scope['llm_sites'])} of "
                     f"{scope['configured_sites']} websites, rule-based modules on {len(scope['rule_sites'])}")
     out = "% Generated by eval_paper from summary.json - do not edit numbers by hand.\n"
     if scope.get("note"):
         out += "% LLM scope: " + scope["note"] + (f" Reason: {scope['reason']}." if scope.get("reason") else "") + "\n"
-    out += table(mods, caption, "tab:modules")
+    out += table(repl["modules"] if repl else mods, caption, "tab:modules")
     like = rep.get("modules_like_for_like") or []
     if scope.get("reduced") and like:
         sites = sorted({x[0] for x in rep.get("comparison_chains") or []})

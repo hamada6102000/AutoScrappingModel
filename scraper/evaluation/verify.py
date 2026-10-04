@@ -7,7 +7,9 @@ Independent verification of the reported numbers (``eval_verify``).
    the database with a separate implementation of the counting rules and
    compares them with the report (each module on the site-repetition chains
    it completed), and checks that no module has a result for a site it was
-   not executed on.
+   not executed on, that no LLM-based run exists outside the recorded LLM
+   sites, and that every replicated LLM value equals the measured value and
+   is labelled as replicated.
 3. Builds the report twice and checks the numbers are identical (determinism).
 4. Checks every snapshot file against its stored SHA-256.
 5. Re-applies every simulated change from its parent page with the stored
@@ -26,7 +28,7 @@ from ..models import ExtractedRecord, GroundTruth, RecordPhase, ScrapeRun, Snaps
 from ..services import snapshots as snapstore
 from ..services.matching import canonical, exact_match
 from ..services.mutations import apply_mutation
-from .config import CONDITION_ORDER
+from .config import COND_INFO, CONDITION_ORDER
 
 TOL = 1e-9
 
@@ -139,6 +141,41 @@ def verify(exp, results_dir: Path | None = None) -> dict:
         check(f"{cond} is reported only for sites it was executed on", claimed <= ran,
               f"reported for {len(claimed)} site(s); executed on {len(ran)}"
               + (f"; not executed: {sorted(claimed - ran)}" if claimed - ran else ""))
+
+    # 2c: the recorded LLM scope and the labelled replication of LLM values
+    scope = (rep.get("llm_scope") or {}).get("decision")
+    if scope:
+        llm_conds = [c for c in CONDITION_ORDER if COND_INFO[c]["generator"] == "llm"]
+        outside = (ScrapeRun.objects.filter(experiment=exp, condition__in=llm_conds)
+                   .exclude(target__site_key__in=scope["llm_sites"]).count())
+        check("no LLM-based run exists outside the recorded LLM sites", outside == 0,
+              f"LLM sites {', '.join(scope['llm_sites'])}; runs elsewhere: {outside}")
+    repl = rep.get("llm_replication")
+    if repl:
+        measured = {m["condition"]: m for m in rep.get("modules") or []}
+        bad = []
+        for row in repl["per_site"]:
+            for cond in measured:
+                origin = row.get(f"{cond}_origin", "")
+                if not origin.startswith("replicated"):
+                    continue
+                if COND_INFO[cond]["generator"] != "llm" or row["site"] in scope["llm_sites"]:
+                    bad.append(f"{row['site']}/{cond}: replicated where it must not be")
+                    continue
+                for k in ("initial_f1", "changed_f1", "overall_f1", "changed_precision", "changed_recall"):
+                    if not _close(row.get(f"{cond}_{k}"), measured[cond].get(k)):
+                        bad.append(f"{row['site']}/{cond}/{k}")
+        for m in repl["modules"]:
+            src = measured.get(m["condition"]) or {}
+            for k in ("initial_f1", "changed_f1", "overall_f1", "changed_precision", "changed_recall"):
+                if not _close(m.get(k), src.get(k)):
+                    bad.append(f"module {m['condition']}/{k}")
+        n_rows = sum(1 for r in repl["per_site"] for c in measured
+                     if r.get(f"{c}_origin", "").startswith("replicated"))
+        check("replicated LLM values equal the measured LLM values, only for LLM modules on non-LLM sites, "
+              "every one labelled 'replicated'", not bad,
+              f"{n_rows} replicated module-site values on {len(repl['replicated_sites'])} sites from "
+              f"{', '.join(repl['source_sites'])}" + (f"; problems: {bad[:5]}" if bad else ""))
 
     # 2b: breaking changes, detection and GT-verified healing, recounted
     correct = {}   # (run_id, field, phase) -> bool

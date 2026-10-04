@@ -79,9 +79,14 @@ def _short(cond: str) -> str:
 
 def _scoped(rep, cond: str, sep: str = " ") -> str:
     """Module name with the number of sites it was executed on."""
-    m = next((x for x in rep.get("modules") or [] if x["condition"] == cond), None)
+    repl = (rep.get("llm_replication") or {}).get("modules")
+    m = next((x for x in repl or rep.get("modules") or [] if x["condition"] == cond), None)
     if not m:
         return _short(cond)
+    if m.get("sites_replicated"):
+        if sep == "\n":
+            return f"{_short(cond)}\n{m['sites_measured']} measured +\n{m['sites_replicated']} replicated sites"
+        return f"{_short(cond)} ({m['sites_measured']} measured + {m['sites_replicated']} replicated)"
     n = m["sites"]
     return f"{_short(cond)}{sep}({n} site{'s' if n != 1 else ''})"
 

@@ -87,22 +87,39 @@ metric, snapshot hashes, byte-identical re-creation of every simulated page),
 `eval_paper` (`paper_results.md`, `paper_table_modules.tex`) and
 `export_results`.
 
-**LLM scope (decision of 2026-10-04).** Because of the Groq free-tier token
-and time limits, the project supervisor decided that the LLM-based modules
-(`self_healing`, `static`) are executed on `site_001` and `site_002` only
-(repetition 1; `LLM_SITES` in `eval/evaluate.py`). No Groq call is made for
-any other site. The rule-based modules run on all 20 sites, 2 repetitions,
-and their results are unchanged. The report therefore lists every module on
-the sites it was executed on (columns *Sites* and *Chains*): the LLM-module
-rows are the result measured on the two sites and are presented as the LLM
-result next to the 20-site rule-based rows. A second table
-(`module_comparison_like_for_like.csv`) compares all four modules on the two
-sites; each paired test uses only the sites both modules were executed on.
-The scope and its reason are written to the run log, `summary.json`
-(`llm_scope`), `report.md`, the figure labels, the paper text and the LaTeX
-tables. No LLM value is written or copied for sites 003–020, and
-`eval_verify` checks that no module is reported for a site it was not
-executed on.
+**LLM scope and replication (decision of 2026-10-04).** Because of the Groq
+free-tier token and time limits, the project supervisor decided that the
+LLM-based modules (`self_healing`, `static`) are executed on `site_001` and
+`site_002` only (repetition 1), and that the values measured there are used
+as the LLM result for all 20 websites. `evaluate.bat` records this with
+
+```bat
+python manage.py eval_llm_scope --llm-sites site_001,site_002 --replicate-to-all-sites --reason "..."
+```
+
+(`eval_data/<exp>/llm_scope.json`, copied into the results as
+`llm_scope_decision.json`). With it:
+
+- `eval_run` never executes an LLM-based module on another site, so no Groq
+  call is made for sites 003-020. The rule-based modules run on all 20 sites,
+  2 repetitions, and their results are unchanged.
+- The report adds, for each of the other 18 sites, the LLM-module values
+  measured on site_001 + site_002 (pooled over their field decisions), each
+  labelled `replicated from site_001 + site_002 (pooled; not measured on this
+  site)` (`per_site_with_llm_replication.csv`). The module table
+  (`module_comparison_with_llm_replication.csv`, report.md, paper text, LaTeX)
+  shows the LLM rows with *Sites = 2 measured + 18 replicated*; their values
+  equal the measured two-site values by construction. Figure labels say the
+  same.
+- Replicated values are not measurements: they are never stored as runs and
+  never enter a statistical test. The paired tests and the like-for-like
+  table (`module_comparison_like_for_like.csv`) use measured values only.
+- `eval_verify` checks that no LLM-based run exists outside the two sites,
+  that every replicated value equals the measured value and is labelled, and
+  that the rule-based results are reported only where they were measured.
+
+`python manage.py eval_llm_scope --clear` removes the decision (LLM modules
+on all sites, no replication).
 
 ## 1. What the evaluation does
 
