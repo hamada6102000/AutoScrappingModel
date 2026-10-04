@@ -691,6 +691,8 @@ def fetch_raw(url: str, timeout: int = 20, user_agent: str = "SelfHealingScraper
         meta["final_url"] = resp.url
         meta["encoding"] = encoding
         meta["content_type"] = resp.headers.get("Content-Type", "")
+    # Lone surrogates (possible in browser-serialised pages) cannot be written as UTF-8.
+    html = html.encode("utf-8", "replace").decode("utf-8")
     meta["elapsed_ms"] = int((time.perf_counter() - start) * 1000)
     meta["suspected_block"] = _block_suspected(status, html)
     if status >= 400:
