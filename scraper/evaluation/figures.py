@@ -45,6 +45,10 @@ def _pct_axis(ax):
     ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
 
 
+def _no_xgrid(ax):
+    ax.grid(axis="x", visible=False)
+
+
 def _legend_top(ax):
     """Legend in the band above the plot, right-aligned (never over data)."""
     ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncols=4, fontsize=8, borderaxespad=0.2)
@@ -85,6 +89,7 @@ def module_f1(plt, rep, path: Path) -> Path | None:
     _pct_axis(ax)
     ax.set_ylabel("Field-level F1")
     ax.set_title("Extraction F1 by module", loc="left")
+    _no_xgrid(ax)
     _legend_top(ax)
     fig.tight_layout()
     fig.savefig(path, dpi=300)
@@ -160,6 +165,7 @@ def healing_by_operator(plt, data, rep, path: Path) -> Path | None:
     _pct_axis(ax)
     ax.set_ylabel("GT-verified healing success")
     ax.set_title("Healing success by change operator\n(detected breaking changes)", loc="left")
+    _no_xgrid(ax)
     _legend_top(ax)
     fig.tight_layout()
     fig.savefig(path, dpi=300)
@@ -182,6 +188,7 @@ def token_reduction(plt, data, path: Path) -> Path | None:
     ax.set_xlabel("Site")
     ax.set_ylabel("Tokens (log scale)")
     ax.set_title("Page size before and after pruning", loc="left")
+    _no_xgrid(ax)
     _legend_top(ax)
     fig.tight_layout()
     fig.savefig(path, dpi=300)
