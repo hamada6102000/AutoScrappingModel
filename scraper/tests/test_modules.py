@@ -262,16 +262,53 @@ class CommonChainTests(TempDataDirMixin, TestCase):
         exp = ModuleConditionTests.prepare(self, ["self_healing", "static", "rule_based", "rule_static"])
         EvaluationRunner(exp, write=lambda m: None, sites=["shop-product", "news-article"],
                          conditions=["rule_based", "rule_static"]).run()
-        # the "LLM" modules get only repetition 1 of one site (budget stop)
+        from scraper.evaluation import report
+        from scraper.evaluation.verify import verify
+        before = {m["condition"]: m for m in report.build(exp)["modules"]}
+        # the "LLM" modules get only repetition 1 of one site (reduced scope)
         EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"], provider=HeuristicProvider(),
                          conditions=["self_healing", "static"], max_llm_calls=10_000).run_site_rep(
             __import__("scraper.evaluation.config", fromlist=["site_by_key"]).site_by_key(exp.config, "shop-product"), 1)
-        from scraper.evaluation import report
-        from scraper.evaluation.verify import verify
         rep = report.build(exp)
         self.assertEqual(rep["comparison_chains"], [("shop-product", 1)])
+        mods = {m["condition"]: m for m in rep["modules"]}
+        # rule-based modules keep their full-scope numbers; LLM modules cover their one site
+        n_reps = exp.config["experiment"]["repetitions"]
+        for c in ("rule_based", "rule_static"):
+            self.assertEqual(mods[c]["chains"], 2 * n_reps)
+            for key in ("initial_f1", "changed_f1", "overall_f1", "breaking_events", "alarm_false_positive_rate"):
+                self.assertEqual(mods[c][key], before[c][key], (c, key))
+        for c in ("self_healing", "static"):
+            self.assertEqual((mods[c]["sites"], mods[c]["site_keys"], mods[c]["chains"]), (1, ["shop-product"], 1))
+        self.assertEqual({m["chains"] for m in rep["modules_like_for_like"]}, {1})
+        scope = rep["llm_scope"]
+        self.assertTrue(scope["reduced"])
+        self.assertEqual(scope["llm_sites"], ["shop-product"])
+        self.assertIn("No LLM output exists for the other sites", scope["note"])
+        tests = {(t["a"], t["b"]): t for t in rep["paired_tests"]}
+        self.assertEqual(tests[("rule_based", "rule_static")]["sites"], 2)
+        self.assertEqual(tests[("self_healing", "static")]["sites"], 1)
+        # no LLM value for the site the LLM never saw
+        news = next(r for r in rep["per_site"] if r["site"] == "news-article")
+        self.assertIsNone(news["self_healing_sustained_f1"])
         res = verify(exp)
         self.assertTrue(res["ok"], res["checks"])
+        self.assertTrue(any("reported only for sites it was executed on" in c["check"] for c in res["checks"]))
+        # the paper text states the scope and the reason
+        import json
+
+        from scraper.evaluation.paper import results_latex, results_markdown
+        rep.pop("_data", None)
+        rep = json.loads(json.dumps(rep, default=str))
+        rep["llm_scope"]["reason"] = "a decision of the project supervisor"
+        text = results_markdown(rep)
+        self.assertIn("were executed on 1 of the 5 websites (shop-product; repetition 1), "
+                      "a decision of the project supervisor", text)
+        self.assertIn("no LLM output exists for those websites and none was copied to them", text)
+        self.assertIn("Like-for-like", text)
+        tex = results_latex(rep)
+        self.assertIn("LLM-based modules executed on 1 of 5 websites, rule-based modules on 2", tex)
+        self.assertIn("tab:modules-same-sites", tex)
 
 
 class RepSubsetTests(TempDataDirMixin, TestCase):

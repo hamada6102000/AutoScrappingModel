@@ -21,12 +21,21 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         add_experiment_arg(parser)
         parser.add_argument("--out", help="Output directory (default: eval_data/<exp>/results).")
+        parser.add_argument("--llm-scope-reason", default="",
+                            help="Why the LLM modules were executed on fewer sites than configured "
+                                 "(recorded in summary.json, report.md and the paper text).")
 
     def handle(self, *args, **opts):
         exp = get_experiment(opts["experiment"])
         out = Path(opts["out"]) if opts["out"] else snapstore.experiment_dir(exp) / "results"
-        rep = report_mod.write(exp, out)
+        rep = report_mod.write(exp, out, llm_scope_reason=opts["llm_scope_reason"])
         self.stdout.write(f"Report for {exp.name}: {rep['counts']['runs']} runs\n")
+        scope = rep.get("llm_scope") or {}
+        if scope.get("note"):
+            self.stdout.write(self.style.WARNING(
+                "LLM SCOPE: " + scope["note"] + (f" Reason: {scope['reason']}." if scope.get("reason") else "")))
+        for m in rep.get("modules") or []:
+            self.stdout.write(f"  {m['module']:<44} {m['sites']:>2} site(s), {m.get('chains')} chain(s)")
         for row in rep["table_5_1"]:
             v = row["value"]
             shown = "n/a" if v is None else (f"{v:.2f} s" if row["unit"] == "s" else f"{v * 100:.1f}%")

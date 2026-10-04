@@ -51,7 +51,9 @@ def _no_xgrid(ax):
 
 def _legend_top(ax):
     """Legend in the band above the plot, right-aligned (never over data)."""
-    ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncols=4, fontsize=8, borderaxespad=0.2)
+    labels = ax.get_legend_handles_labels()[1]
+    ncols = 4 if sum(len(x) for x in labels) <= 70 else 2
+    ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), ncols=ncols, fontsize=8, borderaxespad=0.2)
 
 
 def _spread(ys: list[float], gap: float) -> list[float]:
@@ -66,6 +68,15 @@ def _spread(ys: list[float], gap: float) -> list[float]:
 
 def _short(cond: str) -> str:
     return COND_INFO[cond]["short"]
+
+
+def _scoped(rep, cond: str, sep: str = " ") -> str:
+    """Module name with the number of sites it was executed on."""
+    m = next((x for x in rep.get("modules") or [] if x["condition"] == cond), None)
+    if not m:
+        return _short(cond)
+    n = m["sites"]
+    return f"{_short(cond)}{sep}({n} site{'s' if n != 1 else ''})"
 
 
 def module_f1(plt, rep, path: Path) -> Path | None:
@@ -84,7 +95,7 @@ def module_f1(plt, rep, path: Path) -> Path | None:
             if m[key] is not None:
                 ax.annotate(f"{v * 100:.1f}", (b.get_x() + b.get_width() / 2, v), xytext=(0, 2),
                             textcoords="offset points", ha="center", va="bottom", fontsize=7, color=INK_2)
-    ax.set_xticks(list(xs), [_short(m["condition"]) for m in mods])
+    ax.set_xticks(list(xs), [_scoped(rep, m["condition"], "\n") for m in mods])
     ax.set_ylim(0, 1.08)
     _pct_axis(ax)
     ax.set_ylabel("Field-level F1")
@@ -111,7 +122,7 @@ def f1_by_step(plt, rep, path: Path) -> Path | None:
         if not pts:
             continue
         ax.plot([p[0] for p in pts], [p[1] for p in pts], color=MODULE_COLOR[cond], linewidth=2,
-                marker="o", markersize=4, label=_short(cond))
+                marker="o", markersize=4, label=_scoped(rep, cond))
         ends.append((cond, pts[-1]))
     lo_all = min((r.get(f"{c}_f1") for r in rows for c in conds if r.get(f"{c}_f1") is not None), default=0)
     gap = max(0.03, (1.02 - max(0, lo_all - 0.05)) * 0.06)
@@ -155,7 +166,7 @@ def healing_by_operator(plt, data, rep, path: Path) -> Path | None:
             vals.append(k / n if n else 0)
             ns.append(n)
         pos = [x + (i - (len(conds) - 1) / 2) * width for x in range(len(ops))]
-        bars = ax.bar(pos, vals, width - 0.04, color=MODULE_COLOR[cond], label=_short(cond))
+        bars = ax.bar(pos, vals, width - 0.04, color=MODULE_COLOR[cond], label=_scoped(rep, cond))
         for b, v, n in zip(bars, vals, ns):
             if n:
                 ax.annotate(f"n={n}", (b.get_x() + b.get_width() / 2, v), xytext=(0, 2),

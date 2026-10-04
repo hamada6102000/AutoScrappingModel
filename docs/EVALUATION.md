@@ -87,6 +87,23 @@ metric, snapshot hashes, byte-identical re-creation of every simulated page),
 `eval_paper` (`paper_results.md`, `paper_table_modules.tex`) and
 `export_results`.
 
+**LLM scope (decision of 2026-10-04).** Because of the Groq free-tier token
+and time limits, the project supervisor decided that the LLM-based modules
+(`self_healing`, `static`) are executed on `site_001` and `site_002` only
+(repetition 1; `LLM_SITES` in `eval/evaluate.py`). No Groq call is made for
+any other site. The rule-based modules run on all 20 sites, 2 repetitions,
+and their results are unchanged. The report therefore lists every module on
+the sites it was executed on (columns *Sites* and *Chains*): the LLM-module
+rows are the result measured on the two sites and are presented as the LLM
+result next to the 20-site rule-based rows. A second table
+(`module_comparison_like_for_like.csv`) compares all four modules on the two
+sites; each paired test uses only the sites both modules were executed on.
+The scope and its reason are written to the run log, `summary.json`
+(`llm_scope`), `report.md`, the figure labels, the paper text and the LaTeX
+tables. No LLM value is written or copied for sites 003–020, and
+`eval_verify` checks that no module is reported for a site it was not
+executed on.
+
 ## 1. What the evaluation does
 
 For each site and each repetition (3 by default):

@@ -447,23 +447,35 @@ def module_rows(data, conds) -> list[dict]:
     return rows
 
 
-def paired_tests(data, conds) -> list[dict]:
-    """Per-site paired comparisons of sustained F1 (sites with both values)."""
-    pairs = [("self_healing", "static"), ("rule_based", "rule_static"), ("self_healing", "rule_based"),
-             ("rule_based", "static")]
+PAIRS = [("self_healing", "static"), ("rule_based", "rule_static"), ("self_healing", "rule_based"),
+         ("rule_based", "static")]
+
+
+def paired_tests(data, conds, own: dict | None = None) -> list[dict]:
+    """Per-site paired comparisons of sustained F1 (sites with both values).
+    With ``own`` ({module: completed chains}) each pair is compared on the
+    chains both modules completed, so a pair never mixes different pages."""
     out = []
-    sites = per_site(data, conds)
-    for a, b in pairs:
+    for a, b in PAIRS:
         if a not in conds or b not in conds:
             continue
+        view = restrict(data, own[a] & own[b]) if own is not None else data
+        sites = per_site(view, (a, b))
         diffs = [r[f"{a}_sustained_f1"] - r[f"{b}_sustained_f1"] for r in sites
                  if r.get(f"{a}_sustained_f1") is not None and r.get(f"{b}_sustained_f1") is not None]
         wins = sum(1 for d in diffs if d > 0)
         losses = sum(1 for d in diffs if d < 0)
         out.append({"a": a, "b": b, "sites": len(diffs), "mean_diff": M.describe(diffs)["mean"],
                     "wins": wins, "losses": losses, "ties": len(diffs) - wins - losses,
-                    "sign_test_p": M.sign_test(wins, losses), "wilcoxon_p": M.wilcoxon(diffs)})
+                    "sign_test_p": M.sign_test(wins, losses), "wilcoxon_p": M.wilcoxon(diffs),
+                    "chains": len(own[a] & own[b]) if own is not None else None})
     return out
+
+
+def scope_of(chains: set) -> dict:
+    sites = sorted({s for s, _ in chains})
+    return {"sites": len(sites), "site_keys": sites, "repetitions": sorted({r for _, r in chains}),
+            "chains": len(chains)}
 
 
 def build(exp) -> dict:
@@ -473,8 +485,37 @@ def build(exp) -> dict:
     reps = list(range(1, ecfg["repetitions"] + 1))
 
     module_conds = present_conditions(data, ecfg)
-    chains = common_chains(data, module_conds, len(ecfg["protocol"]["steps"]))
+    n_steps = len(ecfg["protocol"]["steps"])
+    # Each module is reported on every chain it completed (rule-based modules:
+    # all sites; LLM modules: the sites they were executed on). The
+    # like-for-like table uses only the chains every module completed.
+    own_chains = {c: complete_chains(data, c, n_steps) for c in module_conds}
+    chains = common_chains(data, module_conds, n_steps)
     compared = restrict(data, chains)
+    modules = []
+    for c in module_conds:
+        rows = module_rows(restrict(data, own_chains[c]), [c])
+        if rows:
+            rows[0].update({k: v for k, v in scope_of(own_chains[c]).items() if k != "sites"})
+            modules.append(rows[0])
+    like_for_like = module_rows(compared, module_conds) if chains else []
+    for row in like_for_like:
+        row.update({k: v for k, v in scope_of(chains).items() if k != "sites"})
+    llm_conds = [c for c in module_conds if COND_INFO[c]["generator"] == "llm"]
+    llm_sites = sorted({s for c in llm_conds for s, _ in own_chains[c]})
+    rule_sites = sorted({s for c in module_conds if c not in llm_conds for s, _ in own_chains[c]})
+    llm_scope = {
+        "llm_modules": llm_conds,
+        "llm_sites": llm_sites,
+        "rule_sites": rule_sites,
+        "configured_sites": len(exp.config["sites"]),
+        "reduced": bool(llm_conds) and len(llm_sites) < len(exp.config["sites"]),
+        "note": (f"The LLM-based modules were executed on {len(llm_sites)} of {len(exp.config['sites'])} sites "
+                 f"({', '.join(llm_sites)}); their result on these sites is reported as the LLM-module result "
+                 f"next to the rule-based modules, which were executed on {len(rule_sites)} sites. No LLM output "
+                 "exists for the other sites and no LLM value is copied to them."
+                 if llm_conds and len(llm_sites) < len(exp.config["sites"]) else ""),
+    }
     initial = M.aggregate(_recs(data, condition="self_healing", step=0))
     sustained = {c: M.aggregate(_recs(data, condition=c)) for c in ecfg["conditions"]}
     healing = healing_section(data)
@@ -495,24 +536,19 @@ def build(exp) -> dict:
     # F1 by step (F1 over time) per condition
     steps = sorted({r["step"] for r in data["runs"].values() if r["rep"] and r["rep"] >= 1})
     by_step = []
+    views = {c: restrict(data, own_chains[c]) if c in own_chains else data for c in ecfg["conditions"]}
     for s in steps:
         row = {"step": s}
         for c in ecfg["conditions"]:
-            row[f"{c}_f1"] = M.aggregate(_recs(data, condition=c, step=s))["f1"]
+            row[f"{c}_f1"] = M.aggregate(_recs(views[c], condition=c, step=s))["f1"]
         ops = sorted({r["op"] for r in data["runs"].values() if r["step"] == s and r["rep"]})
         row["operators"] = ", ".join(o for o in ops if o)
         by_step.append(row)
 
     sites = per_site(data, module_conds)
-    paired = None
-    if "static" in module_conds and "self_healing" in module_conds:
-        diffs = [r["self_healing_sustained_f1"] - r["static_sustained_f1"] for r in sites
-                 if r["self_healing_sustained_f1"] is not None and r["static_sustained_f1"] is not None]
-        wins = sum(1 for d in diffs if d > 0)
-        losses = sum(1 for d in diffs if d < 0)
-        paired = {"sites": len(diffs), "mean_diff": M.describe(diffs)["mean"],
-                  "wins": wins, "losses": losses, "ties": len(diffs) - wins - losses,
-                  "sign_test_p": M.sign_test(wins, losses), "wilcoxon_p": M.wilcoxon(diffs)}
+    tests = paired_tests(data, module_conds, own_chains)
+    paired = next(({k: v for k, v in t.items() if k not in ("a", "b")} for t in tests
+                   if (t["a"], t["b"]) == ("self_healing", "static")), None)
 
     per_rep = []
     for rep in reps:
@@ -591,10 +627,10 @@ def build(exp) -> dict:
         theirs = [r for r in data["records"] if r["condition"] == cond and r["phase"] == RecordPhase.FINAL]
         row = {"system": cond.split(":", 1)[1], "snapshots": len(snaps), **_f(M.aggregate(theirs))}
         baselines_cmp.append(row)
-        for own in ecfg["conditions"]:
-            mine = [r for r in data["records"] if r["condition"] == own and r["phase"] == RecordPhase.FINAL
+        for mine_cond in ecfg["conditions"]:
+            mine = [r for r in data["records"] if r["condition"] == mine_cond and r["phase"] == RecordPhase.FINAL
                     and data["runs"][r["run_id"]]["snapshot_id"] in snaps]
-            baselines_cmp.append({"system": f"{own} (same snapshots)", "snapshots": len(snaps),
+            baselines_cmp.append({"system": f"{mine_cond} (same snapshots)", "snapshots": len(snaps),
                                   **_f(M.aggregate(mine))})
 
     natural = None
@@ -685,10 +721,12 @@ def build(exp) -> dict:
         "paired_comparison": paired,
         "conditions_run": module_conds,
         "comparison_chains": sorted(chains) if chains is not None else None,
-        "module_repetitions": {c: sorted({r for _, r in complete_chains(data, c, len(ecfg["protocol"]["steps"]))})
-                               for c in module_conds},
-        "modules": module_rows(compared, module_conds),
-        "paired_tests": paired_tests(compared, module_conds),
+        "module_chains": {c: sorted(own_chains[c]) for c in module_conds},
+        "module_repetitions": {c: sorted({r for _, r in own_chains[c]}) for c in module_conds},
+        "llm_scope": llm_scope,
+        "modules": modules,
+        "modules_like_for_like": like_for_like,
+        "paired_tests": tests,
         "per_repetition": per_rep,
         "repetition_summary": rep_summary,
         "tokens": tokens,
@@ -743,12 +781,14 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
                              for k, v in row.items()})
 
 
-def write(exp, out_dir: Path) -> dict:
+def write(exp, out_dir: Path, llm_scope_reason: str = "") -> dict:
     out_dir = Path(out_dir)
     tables = out_dir / "tables"
     tables.mkdir(parents=True, exist_ok=True)
     rep = build(exp)
     data = rep.pop("_data")
+    if rep["llm_scope"].get("reduced"):
+        rep["llm_scope"]["reason"] = llm_scope_reason.strip()
 
     with open(out_dir / "summary.json", "w", encoding="utf-8") as fh:
         json.dump(rep, fh, indent=2, ensure_ascii=False, default=str)
@@ -766,6 +806,7 @@ def write(exp, out_dir: Path) -> dict:
     _write_csv(tables / "runs_labelled.csv", list(data["runs"].values()))
     _write_csv(tables / "accuracy_by_location.csv", rep["by_location"])
     _write_csv(tables / "module_comparison.csv", rep["modules"])
+    _write_csv(tables / "module_comparison_like_for_like.csv", rep["modules_like_for_like"])
     _write_csv(tables / "paired_tests.csv", rep["paired_tests"])
     _write_csv(tables / "excluded_fields.csv", rep["excluded_fields"])
     _write_csv(tables / "field_records.csv", data["records"])
@@ -807,26 +848,39 @@ def render_markdown(rep: dict) -> str:
 
     if rep.get("modules"):
         L.append("## Module comparison\n")
-        ch = rep.get("comparison_chains")
-        if ch is not None:
-            L.append(f"Compared on the {len(ch)} site-repetition chains that every module completed "
-                     f"({len({c[0] for c in ch})} sites, repetitions "
-                     f"{', '.join(str(r) for r in sorted({c[1] for c in ch}))}).  ")
-        L.append("All modules run on the same snapshots and the same seeded change sequences. "
+        scope = rep.get("llm_scope") or {}
+        if scope.get("note"):
+            L.append(f"**Scope: {scope['note']}"
+                     + (f" Reason: {scope['reason']}." if scope.get("reason") else "") + "**  ")
+        L.append("Each module is reported on every site-repetition chain it completed (columns Sites "
+                 "and Chains). All modules run on the same snapshots and the same seeded change sequences. "
                  "Accuracy = correct field decisions / labelled field decisions; P/R/F1 are "
                  "micro-averaged field decisions (lists: items). 't0' = original page, "
                  "'changed' = steps 1..K. FPR = false alarms / non-degraded monitoring runs.\n")
-        L.append("| Module | Acc t0 | F1 t0 | Acc changed | P changed | R changed | F1 changed | "
-                 "F1 overall | Alarm FPR | Healing success | TTR median s | Run latency median ms |")
-        L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
-        for m in rep["modules"]:
-            L.append(f"| {m['module']} | {_pct(m['initial_accuracy'])} | {_pct(m['initial_f1'])} | "
-                     f"{_pct(m['changed_accuracy'])} | {_pct(m['changed_precision'])} | "
-                     f"{_pct(m['changed_recall'])} | {_pct(m['changed_f1'])} | {_pct(m['overall_f1'])} | "
-                     f"{_pct(m['alarm_false_positive_rate'])} | {_pct(m['healing_success_rate'])} | "
-                     f"{_num(m['ttr_median_s'])} | {_num(m['run_latency_median_ms'], 0)} |")
+
+        def table(rows):
+            L.append("| Module | Sites | Chains | Acc t0 | F1 t0 | Acc changed | P changed | R changed | "
+                     "F1 changed | F1 overall | Alarm FPR | Healing success | TTR median s | Run latency median ms |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+            for m in rows:
+                L.append(f"| {m['module']} | {m['sites']} | {m.get('chains', 'n/a')} | "
+                         f"{_pct(m['initial_accuracy'])} | {_pct(m['initial_f1'])} | "
+                         f"{_pct(m['changed_accuracy'])} | {_pct(m['changed_precision'])} | "
+                         f"{_pct(m['changed_recall'])} | {_pct(m['changed_f1'])} | {_pct(m['overall_f1'])} | "
+                         f"{_pct(m['alarm_false_positive_rate'])} | {_pct(m['healing_success_rate'])} | "
+                         f"{_num(m['ttr_median_s'])} | {_num(m['run_latency_median_ms'], 0)} |")
+
+        table(rep["modules"])
+        ch = rep.get("comparison_chains")
+        like = rep.get("modules_like_for_like") or []
+        if like and ch is not None and any(m.get("chains") != len(ch) for m in rep["modules"]):
+            L.append(f"\nLike-for-like: all modules on the {len(ch)} site-repetition chain(s) every module "
+                     f"completed ({', '.join(sorted({c[0] for c in ch}))}; repetition(s) "
+                     f"{', '.join(str(r) for r in sorted({c[1] for c in ch}))}).\n")
+            table(like)
         if rep.get("paired_tests"):
-            L.append("\nPaired per-site comparison of sustained F1:\n")
+            L.append("\nPaired per-site comparison of sustained F1 (each pair on the chains both modules "
+                     "completed):\n")
             L.append("| A vs B | Sites | Mean diff | Wins/Ties/Losses | Sign test p | Wilcoxon p |")
             L.append("|---|---|---|---|---|---|")
             for t in rep["paired_tests"]:
@@ -835,7 +889,9 @@ def render_markdown(rep: dict) -> str:
                          f"{_num(t['wilcoxon_p'], 4)} |")
         L.append("")
 
-    L.append("## Table 5.1 — target metrics (LLM-based self-healing)\n")
+    sh = next((m for m in rep.get("modules") or [] if m["condition"] == "self_healing"), None)
+    L.append("## Table 5.1 — target metrics (LLM-based self-healing"
+             + (f", {sh['sites']} site(s): {', '.join(sh.get('site_keys') or [])}" if sh else "") + ")\n")
     L.append("| Metric | Value | Target | Met |\n|---|---|---|---|")
     for row in rep["table_5_1"]:
         v = row["value"]

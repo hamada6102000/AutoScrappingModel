@@ -5,7 +5,9 @@ Independent verification of the reported numbers (``eval_verify``).
    ground truth (fresh matching, not the stored flags) and counts mismatches.
 2. Re-aggregates precision / recall / F1 / accuracy per module straight from
    the database with a separate implementation of the counting rules and
-   compares them with the report.
+   compares them with the report (each module on the site-repetition chains
+   it completed), and checks that no module has a result for a site it was
+   not executed on.
 3. Builds the report twice and checks the numbers are identical (determinism).
 4. Checks every snapshot file against its stored SHA-256.
 5. Re-applies every simulated change from its parent page with the stored
@@ -20,7 +22,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from ..models import ExtractedRecord, GroundTruth, RecordPhase, Snapshot, SnapshotKind
+from ..models import ExtractedRecord, GroundTruth, RecordPhase, ScrapeRun, Snapshot, SnapshotKind
 from ..services import snapshots as snapstore
 from ..services.matching import canonical, exact_match
 from ..services.mutations import apply_mutation
@@ -78,11 +80,12 @@ def verify(exp, results_dir: Path | None = None) -> dict:
             .select_related("field", "run", "run__target"))
     rep = report_mod.build(exp)
     rep.pop("_data", None)
-    chains = rep.get("comparison_chains")
-    chains = None if chains is None else {(c[0], c[1]) for c in chains}
+    # Each module is reported on the chains it completed (its own scope).
+    own = {cond: {(c[0], c[1]) for c in chains}
+           for cond, chains in (rep.get("module_chains") or {}).items()}
 
     def compared(run) -> bool:
-        return chains is None or (run.target.site_key, run.repetition) in chains
+        return (run.target.site_key, run.repetition) in own.get(run.condition, set())
 
     # 1 + 2: re-score and re-aggregate
     stored_mismatch = 0
@@ -126,6 +129,16 @@ def verify(exp, results_dir: Path | None = None) -> dict:
               f"P={_f(m.get('overall_precision'))} R={_f(m.get('overall_recall'))} "
               f"F1={_f(m.get('overall_f1'))} Acc={_f(m.get('overall_accuracy'))}")
     out["recomputed"] = agg
+
+    # 2a: a module's reported scope is exactly where it has completed runs
+    for m in rep.get("modules") or []:
+        cond = m["condition"]
+        ran = set(ScrapeRun.objects.filter(experiment=exp, condition=cond, completed=True,
+                                           repetition__gte=1).values_list("target__site_key", flat=True))
+        claimed = set(m.get("site_keys") or [])
+        check(f"{cond} is reported only for sites it was executed on", claimed <= ran,
+              f"reported for {len(claimed)} site(s); executed on {len(ran)}"
+              + (f"; not executed: {sorted(claimed - ran)}" if claimed - ran else ""))
 
     # 2b: breaking changes, detection and GT-verified healing, recounted
     correct = {}   # (run_id, field, phase) -> bool
