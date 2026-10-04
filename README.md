@@ -115,7 +115,7 @@ API — no extra Python package required.
    ```bash
    export SCRAPER_LLM_PROVIDER=groq
    export GROQ_API_KEY=gsk_...your_key...
-   # optional: export GROQ_MODEL=llama-3.1-8b-instant   # faster/lighter
+   # optional: export GROQ_MODEL=openai/gpt-oss-20b     # faster/lighter
    ```
 3. Run it:
 
@@ -123,12 +123,10 @@ API — no extra Python package required.
    python manage.py run_scrape --target 1 --provider groq
    ```
 
-Default model is `llama-3.3-70b-versatile`; `llama-3.1-8b-instant` is faster and
-lighter on the free rate limits. Rate limits (HTTP 429) are handled by waiting
-and retrying; the waiting time is logged separately from latency. For ordinary
-runs, an LLM failure falls back to the heuristic for that call and is flagged
-(`fallback_used`); the evaluation never falls back, so LLM results are never
-mixed with heuristic ones.
+Default model is `openai/gpt-oss-120b` (Groq's production replacement for the
+retired `llama-3.3-70b-versatile`); `openai/gpt-oss-20b` is faster and lighter
+on the free rate limits. Run `python manage.py eval_check --ping` to list the
+models your key can use.
 
 > ℹ️ **About Claude access.** The `anthropic` provider uses the **Anthropic API**
 > (a key from **console.anthropic.com**, billed separately). A **claude.ai

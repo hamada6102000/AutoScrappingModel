@@ -248,8 +248,18 @@ If the run would take too many days, the options are, in order of preference:
 1. continue over several days (results are identical, because the design is seeded);
 2. reduce `repetitions` to 2 (new experiment name, before any run);
 3. use Groq's paid Developer tier (same model, so comparable results);
-4. switch `model` to `llama-3.1-8b-instant` (a different model: report it as
+4. switch `model` to `openai/gpt-oss-20b` (a different model: report it as
    such, and never mix models within one experiment).
+
+**Model.** Groq deprecated `llama-3.3-70b-versatile` and `llama-3.1-8b-instant`
+on 2026-08-16 (now enterprise-only) and lists `openai/gpt-oss-120b` as the
+replacement; it is the experiment's model. It is a reasoning model: the config
+sets `reasoning_effort: low` and `include_reasoning: false`. Every request is
+planned to fit the account's per-minute token limit (`tokens_per_minute`,
+checked against the limit Groq reports on `eval_check --ping`): the completion
+budget is reserved first and the page HTML is shortened at the end when needed
+(flagged as truncated in every call log). `eval_audit` shows, per field,
+whether the recorded value is inside the HTML the model actually receives.
 
 ## 6. Optional extras
 

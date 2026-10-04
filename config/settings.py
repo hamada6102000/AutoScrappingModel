@@ -131,7 +131,7 @@ SCRAPER = {
 
     # Groq (free, fast LLaMA inference — get a free key at console.groq.com).
     "GROQ_API_KEY": os.getenv("GROQ_API_KEY", ""),
-    "GROQ_MODEL": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+    "GROQ_MODEL": os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
     "GROQ_HOST": os.getenv("GROQ_HOST", "https://api.groq.com/openai/v1"),
 
     # Anthropic / Claude (paid API — separate from claude.ai subscription).
@@ -191,7 +191,7 @@ SCRAPER = {
     "LLM_MAX_WAIT_SECONDS": env_int("SCRAPER_LLM_MAX_WAIT_SECONDS", 900),
 
     # Optional price table for cost estimates, USD per 1M tokens, e.g.
-    # SCRAPER_PRICING='{"llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79}}'
+    # SCRAPER_PRICING='{"<model id>": {"input": <USD per 1M>, "output": <USD per 1M>}}'
     # Left empty, costs are reported as unknown (only token counts are used).
     "PRICING": json.loads(os.getenv("SCRAPER_PRICING", "{}") or "{}"),
 

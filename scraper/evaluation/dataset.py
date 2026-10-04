@@ -534,7 +534,8 @@ def expect_texts(fields: list[dict], limit: int = 3) -> list[str]:
 def to_config(dataset: dict, *, name: str, repetitions: int, planned_repetitions: int | None,
               provider: str = "groq", model: str | None = None, render: str = "auto",
               user_agent: str | None = None, date_order: str = "mdy",
-              max_input_chars: int | None = None) -> dict:
+              max_input_chars: int | None = None, reasoning_effort: str | None = None,
+              include_reasoning: bool | None = None, tokens_per_minute: int | None = None) -> dict:
     sites = []
     for s in dataset["sites"]:
         fields = [field_config(f) for f in s.get("fields", [])]
@@ -554,6 +555,13 @@ def to_config(dataset: dict, *, name: str, repetitions: int, planned_repetitions
         llm["model"] = model
     if max_input_chars:
         llm["max_input_chars"] = max_input_chars
+    if reasoning_effort:
+        llm["reasoning_effort"] = reasoning_effort
+    if include_reasoning is not None:
+        llm["include_reasoning"] = include_reasoning
+    if tokens_per_minute:
+        llm["tokens_per_minute"] = tokens_per_minute
+        llm["completion_counts_in_tpm"] = True
     meta = dataset.get("meta") or {}
     return {
         "experiment": {

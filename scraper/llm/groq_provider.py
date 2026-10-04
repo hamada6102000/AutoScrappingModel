@@ -24,7 +24,9 @@ from .base import (
     FailureHint, FieldSpec, LLMError, LLMProvider, LLMResult,
     RateLimitExhausted, RequestTooLarge,
 )
-from .prompts import SYSTEM_PROMPT, build_prompt, parse_xpath_json
+from .prompts import (
+    SYSTEM_PROMPT, build_prompt, completion_budget, parse_xpath_json, prompt_token_budget,
+)
 
 _WAIT_IN_MSG = re.compile(r"try again in\s+(?:(\d+)m)?\s*([\d.]+)s", re.I)
 
@@ -56,6 +58,10 @@ class GroqProvider(LLMProvider):
         max_wait_seconds: int = 900,
         max_input_chars: int = 60000,
         sleep=time.sleep,
+        reasoning_effort: Optional[str] = None,
+        include_reasoning: Optional[bool] = None,
+        tokens_per_minute: Optional[int] = None,
+        completion_counts_in_tpm: bool = True,
     ):
         if not api_key:
             raise ValueError(
@@ -72,6 +78,14 @@ class GroqProvider(LLMProvider):
         self.max_input_chars = max_input_chars
         self._sleep = sleep
         self.last_rate_limits: dict = {}
+        # Reasoning models (openai/gpt-oss-*): reasoning depth and whether the
+        # reasoning text is returned. Sent only when set.
+        self.reasoning_effort = reasoning_effort
+        self.include_reasoning = include_reasoning
+        # Per-minute token limit of the account: every request (prompt, plus
+        # max_completion_tokens if the provider counts it) is planned to fit.
+        self.tokens_per_minute = tokens_per_minute
+        self.completion_counts_in_tpm = completion_counts_in_tpm
 
     def generate_xpaths(
         self,
@@ -79,22 +93,28 @@ class GroqProvider(LLMProvider):
         fields: list[FieldSpec],
         failure_history: Optional[list[FailureHint]] = None,
     ) -> LLMResult:
-        prompt, meta = build_prompt(pruned_html, fields, failure_history, self.max_input_chars)
+        max_tokens = completion_budget(len(fields), self.reasoning_effort)
+        prompt, meta = build_prompt(pruned_html, fields, failure_history, self.max_input_chars,
+                                    max_prompt_tokens=self.prompt_token_budget(max_tokens))
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
-        # Room for one XPath per field (~70 tokens each in JSON), bounded.
-        max_tokens = min(4096, 300 + 70 * len(fields))
         data, call = self._chat(messages, max_tokens=max_tokens)
-        text = data["choices"][0]["message"]["content"] or ""
+        choice = (data.get("choices") or [{}])[0]
+        text = (choice.get("message") or {}).get("content") or ""
         usage = data.get("usage", {}) or {}
+        note = ""
+        if call.get("json_failed"):
+            note = "[json_validate_failed] "
+        elif choice.get("finish_reason") == "length":
+            note = "[finish_reason=length] "
         return LLMResult(
             xpaths=parse_xpath_json(text, fields),
             model=data.get("model") or self.model,
             prompt_tokens=usage.get("prompt_tokens", 0) or 0,
             completion_tokens=usage.get("completion_tokens", 0) or 0,
-            raw_response=text,
+            raw_response=note + text,
             latency_ms=call["latency_ms"],
             rate_limit_wait_ms=call["wait_ms"],
             retries=call["retries"],
@@ -102,6 +122,35 @@ class GroqProvider(LLMProvider):
             input_truncated=meta["input_truncated"],
             prompt_sha=meta["prompt_sha"],
         )
+
+    def prompt_token_budget(self, max_tokens: int) -> Optional[int]:
+        """Largest prompt (tokens) that keeps one request within the TPM limit."""
+        return prompt_token_budget(self.tokens_per_minute, max_tokens, self.completion_counts_in_tpm)
+
+    def list_models(self) -> list[str]:
+        """Model ids this API key can use (GET /models)."""
+        resp = requests.get(f"{self.base}/models", timeout=self.timeout,
+                            headers={"Authorization": f"Bearer {self.api_key}"})
+        if resp.status_code >= 400:
+            raise LLMError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+        return sorted(m.get("id", "") for m in resp.json().get("data", []) if m.get("active", True))
+
+    def probe_completion_accounting(self, tokens_per_minute: int) -> Optional[bool]:
+        """Does the per-minute limit count max_completion_tokens up front?
+        Sends a tiny prompt asking for more completion tokens than the limit:
+        rejected as too large -> counted; accepted -> not counted."""
+        payload = {"model": self.model, "temperature": 0,
+                   "messages": [{"role": "user", "content": "Reply with the word ok."}],
+                   "max_completion_tokens": tokens_per_minute + 200}
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
+        resp = requests.post(f"{self.base}/chat/completions", json=payload, timeout=self.timeout,
+                             headers={"Authorization": f"Bearer {self.api_key}"})
+        if resp.status_code == 200:
+            return False
+        if resp.status_code in (413, 429) and re.search(r"(?i)request too large|requested", resp.text):
+            return True
+        return None
 
     # ------------------------------------------------------------------
     def _chat(self, messages: list[dict], max_tokens: int = 1500) -> tuple[dict, dict]:
@@ -111,9 +160,13 @@ class GroqProvider(LLMProvider):
             "model": self.model,
             "messages": messages,
             "temperature": 0,
-            "max_tokens": max_tokens,
+            "max_completion_tokens": max_tokens,
             "response_format": {"type": "json_object"},
         }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
+        if self.include_reasoning is not None:
+            payload["include_reasoning"] = self.include_reasoning
         waited = 0.0
         retries = 0
         attempt = 0
@@ -151,6 +204,17 @@ class GroqProvider(LLMProvider):
                 continue
             if status == 413:
                 raise RequestTooLarge(f"prompt too large for {self.model}: {resp.text[:200]}")
+            if status == 400 and "json_validate_failed" in resp.text:
+                # The model answered, but not with valid JSON: a model output
+                # failure (scored as such), not an infrastructure error.
+                try:
+                    failed = (resp.json().get("error") or {}).get("failed_generation") or ""
+                except ValueError:
+                    failed = ""
+                return {"choices": [{"message": {"content": failed}, "finish_reason": "error"}],
+                        "model": self.model, "usage": {}}, {
+                    "latency_ms": latency_ms, "wait_ms": int(waited * 1000),
+                    "retries": retries, "json_failed": True}
             if status == 400 and "response_format" in resp.text and "response_format" in payload:
                 payload.pop("response_format")  # model without JSON mode
                 retries += 1

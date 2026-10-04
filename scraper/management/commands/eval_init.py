@@ -9,8 +9,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 
 from scraper.evaluation.config import ConfigError, load_config
-from scraper.evaluation.protocol import EvalError, init_experiment
-from scraper.llm.factory import get_provider
+from scraper.evaluation.protocol import EvalError, init_experiment, make_provider
 from scraper.services import tokens
 
 
@@ -38,7 +37,12 @@ class Command(BaseCommand):
         self.stdout.write(f"  sites        : {len(config['sites'])}")
         self.stdout.write(f"  conditions   : {', '.join(e['conditions'])}")
         self.stdout.write(f"  repetitions  : {e['repetitions']}  (targets: {exp.targets.count()})")
-        self.stdout.write(f"  LLM          : {e['llm']['provider']} / {e['llm'].get('model') or 'default'}")
+        self.stdout.write(f"  LLM          : {e['llm']['provider']} / {e['llm'].get('model') or 'default'}"
+                          + (f" (reasoning {e['llm']['reasoning_effort']})" if e['llm'].get('reasoning_effort') else "")
+                          + (f", TPM {e['llm']['tokens_per_minute']}" if e['llm'].get('tokens_per_minute') else ""))
+        excluded = sum(len(s.get("excluded_fields") or []) for s in config["sites"])
+        self.stdout.write(f"  fields       : {sum(len(s['fields']) for s in config['sites'])}"
+                          + (f" (+{excluded} excluded)" if excluded else ""))
         self.stdout.write(f"  tokenizer    : {tokens.tokenizer_name()}")
         if tokens.is_estimate():
             self.stdout.write(self.style.WARNING(
@@ -46,7 +50,7 @@ class Command(BaseCommand):
                 "Token counts would be chars/4 estimates. Check your internet connection and "
                 "'pip install tiktoken', then re-run eval_init."))
         try:
-            get_provider(e["llm"]["provider"], e["llm"].get("model"))
+            make_provider(e)
         except Exception as exc:
             self.stdout.write(self.style.WARNING(f"  WARNING: LLM provider not usable yet: {exc}"))
         self.stdout.write("\nNext: python manage.py eval_snapshot")

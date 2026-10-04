@@ -24,12 +24,12 @@ from pathlib import Path
 from django.conf import settings
 
 from ..llm.base import FieldSpec
-from ..llm.prompts import build_prompt
+from ..llm.prompts import SYSTEM_PROMPT, TRUNCATION_MARK
 from ..services import snapshots as snapstore
 from ..services import tokens as tok
 from .dataset import ELLIPSIS, Located, PageIndex, locate, probes
 from .gt_io import ABSENT, COLUMNS, INSTRUCTIONS
-from .protocol import baseline_snapshot
+from .protocol import baseline_snapshot, request_plan
 
 NEEDS_LABEL = ("not-found", "not-literal", "list-partial")
 PREFILL_NOTE = {
@@ -77,9 +77,12 @@ def audit_site(exp, site: dict, cap: int | None = None) -> dict:
     check = meta.get("check") or {}
     page = snapstore.pruned_page(snap, site["prune_keep"])
     idx = PageIndex(page.clean_html, snap.url)
-    cap = max_input_chars(exp, cap)
-    prompt, pmeta = build_prompt(page.llm_view, _specs(site), max_html_chars=cap)
-    view_html = page.llm_view[:cap] if cap else page.llm_view
+    ecfg = exp.config["experiment"]
+    if cap:
+        ecfg = {**ecfg, "llm": {**ecfg["llm"], "max_input_chars": int(cap)}}
+    prompt, pmeta, max_out = request_plan(ecfg, page.llm_view, _specs(site))
+    shown = pmeta["input_chars"] - (len(TRUNCATION_MARK) if pmeta["input_truncated"] else 0)
+    view_html = page.llm_view[:shown]
     view_idx = PageIndex(view_html, snap.url)
     row.update({
         "http_status": snap.http_status,
@@ -93,7 +96,9 @@ def audit_site(exp, site: dict, cap: int | None = None) -> dict:
         "tokenizer": snap.tokenizer,
         "raw_tokens": snap.raw_tokens, "clean_tokens": snap.clean_tokens,
         "llm_view_tokens": snap.llm_view_tokens,
-        "prompt_tokens": tok.count_tokens(prompt),
+        "prompt_tokens": tok.count_tokens(SYSTEM_PROMPT + prompt),
+        "completion_budget": max_out,
+        "prompt_html_chars": shown,
         "prompt_truncated": pmeta["input_truncated"],
         "has_metadata": idx.meta_root is not None,
         "labeling_view": str(snapstore.label_view_path(snap)),
@@ -118,7 +123,16 @@ def audit_site(exp, site: dict, cap: int | None = None) -> dict:
 
 
 def run_audit(exp, cap: int | None = None) -> list[dict]:
-    return [audit_site(exp, s, cap) for s in exp.config["sites"]]
+    rows = []
+    for s in exp.config["sites"]:
+        try:
+            rows.append(audit_site(exp, s, cap))
+        except Exception as exc:  # report the site, keep auditing the others
+            rows.append({"site": s["key"], "name": s["name"], "category": s["category"],
+                         "url": s["url"], "snapshot": False, "error": f"{type(exc).__name__}: {exc}",
+                         "fields": [{"field": f["name"], "status": "audit-error", "excluded": False}
+                                    for f in s["fields"]]})
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +162,7 @@ def write_outputs(exp, rows: list[dict], out_dir: Path, cap: int | None = None) 
         site_rows.append({
             **{k: r.get(k, "") for k in site_cols},
             "n_fields": len(fs),
-            "found": sum(1 for f in fs if f["status"] not in NEEDS_LABEL and f["status"] != "no-snapshot"),
+            "found": sum(1 for f in fs if f["status"] not in NEEDS_LABEL and f["status"] not in ("no-snapshot", "audit-error")),
             "needs_label": sum(1 for f in fs if f["status"] in NEEDS_LABEL),
             "only_metadata": sum(1 for f in fs if f.get("found_in") == "metadata"),
             "not_in_prompt": sum(1 for f in fs if f.get("in_prompt") is False),
@@ -187,7 +201,7 @@ def markdown(exp, rows, site_rows, cap: int | None = None) -> str:
     L += ["", "## Fields that need attention", ""]
     for r in rows:
         issues = [f for f in r["fields"] if not f.get("excluded") and
-                  (f["status"] in NEEDS_LABEL or f.get("in_prompt") is False or f["status"] == "no-snapshot")]
+                  (f["status"] in NEEDS_LABEL or f.get("in_prompt") is False or f["status"] in ("no-snapshot", "audit-error"))]
         if not issues:
             continue
         L.append(f"### {r['site']} — {r['name']}")

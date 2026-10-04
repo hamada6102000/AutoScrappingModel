@@ -39,17 +39,18 @@ class Command(BaseCommand):
         for r in rows:
             fs = [f for f in r["fields"] if not f.get("excluded")]
             total += len(fs)
-            needs += sum(1 for f in fs if f["status"] in NEEDS_LABEL or f["status"] == "no-snapshot")
+            needs += sum(1 for f in fs if f["status"] in NEEDS_LABEL or f["status"] in ("no-snapshot", "audit-error"))
             meta_only += sum(1 for f in fs if f.get("found_in") == "metadata")
             if not r.get("snapshot"):
                 missing += 1
-            flag = "" if r.get("snapshot") else "  (NO SNAPSHOT)"
+            flag = "" if r.get("snapshot") else (f"  (AUDIT ERROR: {r['error']})" if r.get("error")
+                                                 else "  (NO SNAPSHOT)")
             if r.get("snapshot") and not r.get("content_ok"):
                 flag = "  (CONTENT CHECK FAILED)"
             self.stdout.write(
                 f"  {r['site']:<10} render {str(r.get('render', '-')):<6} prompt "
                 f"{str(r.get('prompt_tokens', '-')):>6} tok  fields {len(fs):>3}  to label "
-                f"{sum(1 for f in fs if f['status'] in NEEDS_LABEL or f['status'] == 'no-snapshot'):>3}{flag}")
+                f"{sum(1 for f in fs if f['status'] in NEEDS_LABEL or f['status'] in ('no-snapshot', 'audit-error')):>3}{flag}")
         self.stdout.write(f"\n{total} fields; {total - needs} pre-filled from the dataset, "
                           f"{needs} to label; {meta_only} found only in meta tags/JSON-LD; "
                           f"{missing} site(s) without a snapshot.")

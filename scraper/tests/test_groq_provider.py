@@ -104,3 +104,67 @@ class GroqProviderTests(SimpleTestCase):
         with mock.patch(POST, return_value=ok()):
             res = provider.generate_xpaths("<html>" + "x" * 500 + "</html>", FIELDS)
         self.assertTrue(res.input_truncated)
+
+
+class ReasoningModelTests(SimpleTestCase):
+    """openai/gpt-oss-* options, per-minute token budget, JSON-mode failures."""
+
+    def make(self, **kw):
+        return GroqProvider(api_key="gsk_test", model="openai/gpt-oss-120b", sleep=lambda s: None, **kw)
+
+    def test_reasoning_options_and_completion_budget_are_sent(self):
+        p = self.make(reasoning_effort="low", include_reasoning=False)
+        with mock.patch(POST, return_value=ok()) as post:
+            p.generate_xpaths("<html><body><h1>x</h1></body></html>", FIELDS)
+        body = post.call_args.kwargs["json"]
+        self.assertEqual(body["model"], "openai/gpt-oss-120b")
+        self.assertEqual(body["reasoning_effort"], "low")
+        self.assertIs(body["include_reasoning"], False)
+        self.assertNotIn("max_tokens", body)
+        self.assertGreaterEqual(body["max_completion_tokens"], 2000)  # reasoning reserve
+
+    def test_no_reasoning_options_unless_configured(self):
+        with mock.patch(POST, return_value=ok()) as post:
+            self.make().generate_xpaths("<html><body><h1>x</h1></body></html>", FIELDS)
+        body = post.call_args.kwargs["json"]
+        self.assertNotIn("reasoning_effort", body)
+        self.assertNotIn("include_reasoning", body)
+
+    def test_prompt_is_shortened_to_fit_the_per_minute_limit(self):
+        from scraper.llm.prompts import SYSTEM_PROMPT, conservative_counter
+        page = "<html><body>" + "".join(f"<p class='c{i}'>row {i} text</p>" for i in range(3000)) + "</body></html>"
+        p = self.make(reasoning_effort="low", tokens_per_minute=8000)
+        with mock.patch(POST, return_value=ok()) as post:
+            res = p.generate_xpaths(page, FIELDS)
+        body = post.call_args.kwargs["json"]
+        prompt = body["messages"][1]["content"]
+        count = conservative_counter()
+        self.assertTrue(res.input_truncated)
+        self.assertLessEqual(count(SYSTEM_PROMPT + prompt) + body["max_completion_tokens"], int(8000 * 0.85))
+        self.assertIn("[input truncated]", prompt)
+
+    def test_json_validate_failed_is_a_model_answer_not_an_outage(self):
+        err = Resp({"error": {"code": "json_validate_failed", "message": "Failed to generate JSON",
+                              "failed_generation": '{"title": "//h1"'}}, status_code=400)
+        with mock.patch(POST, return_value=err):
+            res = self.make().generate_xpaths("<html><body><h1>x</h1></body></html>", FIELDS)
+        self.assertTrue(res.raw_response.startswith("[json_validate_failed]"))
+        self.assertEqual(res.xpaths, {})
+
+    def test_truncated_answer_is_flagged(self):
+        resp = ok()
+        resp._payload["choices"][0]["finish_reason"] = "length"
+        with mock.patch(POST, return_value=resp):
+            res = self.make().generate_xpaths("<html><body><h1>x</h1></body></html>", FIELDS)
+        self.assertTrue(res.raw_response.startswith("[finish_reason=length]"))
+
+    def test_list_models_and_tpm_probe(self):
+        models = Resp({"data": [{"id": "openai/gpt-oss-120b", "active": True},
+                                {"id": "old-model", "active": False}]})
+        with mock.patch("scraper.llm.groq_provider.requests.get", return_value=models):
+            self.assertEqual(self.make().list_models(), ["openai/gpt-oss-120b"])
+        too_large = Resp(status_code=413, text="Request too large ... Limit 8000, Requested 8212")
+        with mock.patch(POST, return_value=too_large):
+            self.assertTrue(self.make().probe_completion_accounting(8000))
+        with mock.patch(POST, return_value=ok()):
+            self.assertFalse(self.make().probe_completion_accounting(8000))

@@ -50,7 +50,13 @@ class Command(BaseCommand):
         parser.add_argument("--planned-repetitions", type=int, default=3,
                             help="repetitions in the study design (reported as planned)")
         parser.add_argument("--provider", default="groq")
-        parser.add_argument("--model", default="llama-3.3-70b-versatile")
+        # Groq retired llama-3.3-70b-versatile for non-enterprise keys (deprecated
+        # 2026-08-16); openai/gpt-oss-120b is its listed production replacement.
+        parser.add_argument("--model", default="openai/gpt-oss-120b")
+        parser.add_argument("--reasoning-effort", default="low", choices=["low", "medium", "high", "none"],
+                            help="for reasoning models (gpt-oss); 'none' sends nothing")
+        parser.add_argument("--tokens-per-minute", type=int, default=8000,
+                            help="the account's per-minute token limit (0 = do not plan for it)")
         parser.add_argument("--render", default="auto", choices=["static", "js", "auto"])
         parser.add_argument("--user-agent", default=BROWSER_UA)
         parser.add_argument("--date-order", default="mdy", choices=["mdy", "dmy"])
@@ -72,6 +78,9 @@ class Command(BaseCommand):
             planned_repetitions=opts["planned_repetitions"], provider=opts["provider"],
             model=opts["model"], render=opts["render"], user_agent=opts["user_agent"],
             date_order=opts["date_order"], max_input_chars=opts["max_input_chars"],
+            reasoning_effort=None if opts["reasoning_effort"] == "none" else opts["reasoning_effort"],
+            include_reasoning=False if opts["reasoning_effort"] != "none" else None,
+            tokens_per_minute=opts["tokens_per_minute"] or None,
         )
         try:
             resolved = resolve(config, base_dir=out.parent)

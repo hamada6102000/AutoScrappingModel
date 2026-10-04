@@ -104,6 +104,14 @@ def resolve(data: dict, base_dir: Path | None = None) -> dict:
     if llm.get("max_input_chars") is not None and (
             not isinstance(llm["max_input_chars"], int) or llm["max_input_chars"] < 2000):
         problems.append("experiment.llm.max_input_chars must be an integer >= 2000")
+    if llm.get("reasoning_effort") not in (None, "low", "medium", "high"):
+        problems.append("experiment.llm.reasoning_effort must be low, medium or high")
+    if llm.get("tokens_per_minute") is not None and (
+            not isinstance(llm["tokens_per_minute"], int) or llm["tokens_per_minute"] < 1000):
+        problems.append("experiment.llm.tokens_per_minute must be an integer >= 1000")
+    for key in ("include_reasoning", "completion_counts_in_tpm"):
+        if llm.get(key) is not None and not isinstance(llm[key], bool):
+            problems.append(f"experiment.llm.{key} must be true or false")
     if exp.get("date_order") not in ("dmy", "mdy"):
         problems.append("experiment.date_order must be dmy or mdy")
     planned = exp.get("planned_repetitions")

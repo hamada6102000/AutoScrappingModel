@@ -13,7 +13,9 @@ experiment:
 
   llm:
     provider: groq                # groq | anthropic | openai | ollama | heuristic
-    model: llama-3.3-70b-versatile  # leave out to use the provider's default
+    model: openai/gpt-oss-120b      # leave out to use the provider's default
+    reasoning_effort: low           # reasoning models only (gpt-oss): low | medium | high
+    tokens_per_minute: 8000         # your account's per-minute token limit (eval_check --ping shows it)
 
   # Pipeline parameters (proposal Table 5.1 / Section 3)
   health_threshold: 0.80          # self-healing triggers below this health score

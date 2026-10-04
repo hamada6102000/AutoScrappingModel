@@ -22,10 +22,17 @@ logger = logging.getLogger(__name__)
 PROVIDERS = ("heuristic", "groq", "anthropic", "openai", "ollama")
 
 
-def get_provider(name: str | None = None, model: str | None = None) -> LLMProvider:
+GROQ_OPTIONS = ("reasoning_effort", "include_reasoning", "tokens_per_minute",
+                "completion_counts_in_tpm")
+
+
+def get_provider(name: str | None = None, model: str | None = None, **options) -> LLMProvider:
+    """``options`` (from the experiment's llm section): max_input_chars and,
+    for Groq, reasoning_effort, include_reasoning, tokens_per_minute,
+    completion_counts_in_tpm."""
     cfg = settings.SCRAPER
     name = (name or cfg.get("LLM_PROVIDER") or "heuristic").lower()
-    max_chars = cfg.get("LLM_MAX_INPUT_CHARS", 60000)
+    max_chars = options.get("max_input_chars") or cfg.get("LLM_MAX_INPUT_CHARS", 60000)
 
     if name == "heuristic":
         return HeuristicProvider()
@@ -35,11 +42,12 @@ def get_provider(name: str | None = None, model: str | None = None) -> LLMProvid
 
         return GroqProvider(
             api_key=cfg.get("GROQ_API_KEY", ""),
-            model=model or cfg.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            model=model or cfg.get("GROQ_MODEL", "openai/gpt-oss-120b"),
             host=cfg.get("GROQ_HOST", "https://api.groq.com/openai/v1"),
             max_retries=cfg.get("LLM_MAX_RETRIES", 6),
             max_wait_seconds=cfg.get("LLM_MAX_WAIT_SECONDS", 900),
             max_input_chars=max_chars,
+            **{k: options[k] for k in GROQ_OPTIONS if options.get(k) is not None},
         )
 
     if name == "anthropic":

@@ -86,3 +86,29 @@ class DecodeTests(SimpleTestCase):
     def test_defaults_to_utf8_not_latin1(self):
         text, _ = decode_html("السعر ١٤٩".encode("utf-8"), "text/html")
         self.assertEqual(text, "السعر ١٤٩")
+
+
+
+class MarkerAndSanitisingTests(SimpleTestCase):
+    """Run markers must be valid XML comments; JSON-LD may carry control characters."""
+
+    def test_bem_class_names_do_not_break_the_llm_view(self):
+        items = "".join(f'<li class="card card--promo">Item {i}</li>' for i in range(10))
+        page = prune(f"<html><body><main><ul>{items}</ul></main></body></html>")
+        self.assertIn("+7 more similar <li> elements omitted (same tag and class as the elements above)",
+                      page.llm_view)
+        self.assertEqual(page.llm_view.count("<li class"), 3)
+        self.assertEqual(page.clean_html.count("<li class"), 10)  # clean DOM unchanged
+
+    def test_plain_class_names_are_still_quoted(self):
+        items = "".join(f'<li class="card">Item {i}</li>' for i in range(8))
+        page = prune(f"<html><body><main><ul>{items}</ul></main></body></html>")
+        self.assertIn('+5 more similar <li class="card"> elements omitted', page.llm_view)
+
+    def test_control_characters_in_jsonld_are_dropped(self):
+        html = ('<html><head><script type="application/ld+json">'
+                '{"name": "A\\u0003B\\u0000C", "k\\u0001ey": "v"}</script></head>'
+                '<body><main><h1>x</h1></main></body></html>')
+        page = prune(html, structured=True)
+        self.assertIn('<div data-key="name">ABC</div>', page.clean_html)
+        self.assertIn('data-key="key"', page.clean_html)

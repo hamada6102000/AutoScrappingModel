@@ -365,7 +365,7 @@ def _json_nodes(key, value, depth, budget) -> list:
         return out
     el = etree.Element("div")
     if key is not None:
-        el.set("data-key", str(key)[:80])
+        el.set("data-key", xml_safe(str(key))[:80])
     budget[0] -= 1
     if isinstance(value, dict):
         for k, v in value.items():
@@ -375,7 +375,7 @@ def _json_nodes(key, value, depth, budget) -> list:
     if isinstance(value, bool):
         text = "true" if value else "false"
     else:
-        text = _WS.sub(" ", str(value)).strip()
+        text = xml_safe(_WS.sub(" ", str(value))).strip()
     if not text:
         return []
     el.text = text
@@ -390,15 +390,15 @@ def _metadata_block(meta: dict):
     if meta["title"]:
         t = etree.SubElement(section, "div")
         t.set("data-meta", "title")
-        t.text = meta["title"]
+        t.text = xml_safe(meta["title"])
     for attr, name, content in meta["metas"]:
         m = etree.SubElement(section, "meta")
-        m.set(attr, name)
-        m.set("content", content)
+        m.set(attr, xml_safe(name))
+        m.set("content", xml_safe(content))
     if meta["canonical"]:
         link = etree.SubElement(section, "link")
         link.set("rel", "canonical")
-        link.set("href", meta["canonical"])
+        link.set("href", xml_safe(meta["canonical"]))
     budget = [_JSONLD_MAX_NODES]
     blocks = []
     for i, data in enumerate(meta["jsonld"], start=1):
@@ -438,6 +438,37 @@ def _truncate(text: str | None, limit: int):
     return text[:limit].rstrip() + "…"
 
 
+# Characters XML 1.0 allows; lxml rejects any other in text, attributes and comments.
+_XML_ILLEGAL = re.compile("[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
+def xml_safe(text: str) -> str:
+    """Drop characters that cannot appear in an XML/HTML tree (NUL, control
+    characters, lone surrogates) — e.g. from JSON-LD string escapes."""
+    return _XML_ILLEGAL.sub("", text)
+
+
+def _marker_text(n: int, sig: tuple) -> str:
+    """Text of the comment that replaces a collapsed run of similar siblings.
+
+    It names the tag, class and data-key of the omitted elements. An XML
+    comment may not contain "--" or end with "-", which BEM-style class names
+    ("price--sale") or keys can produce; then the marker refers to the
+    identical siblings kept just above it instead of quoting the names.
+    """
+    tag, classes, key = sig
+    cls = " ".join(classes)
+    text = (f" +{n} more similar <{tag}"
+            + (f' class="{cls}"' if cls else "")
+            + (f' data-key="{key}"' if key else "")
+            + "> elements omitted ")
+    if "--" in text or text.rstrip(" ").endswith("-"):
+        same = ["tag"] + (["class"] if cls else []) + (["data-key"] if key else [])
+        names = same[0] if len(same) == 1 else ", ".join(same[:-1]) + " and " + same[-1]
+        text = f" +{n} more similar <{tag}> elements omitted (same {names} as the elements above) "
+    return xml_safe(text)
+
+
 def _llm_view(clean_root) -> str:
     root = copy.deepcopy(clean_root)
     for el in root.iter():
@@ -463,13 +494,7 @@ def _llm_view(clean_root) -> str:
             run = children[i : j + 1]
             if len(run) >= RUN_MIN:
                 hidden = run[RUN_KEEP:]
-                cls = " ".join(sig[1])
-                marker = etree.Comment(
-                    f" +{len(hidden)} more similar <{sig[0]}"
-                    + (f' class="{cls}"' if cls else "")
-                    + (f' data-key="{sig[2]}"' if sig[2] else "")
-                    + "> elements omitted "
-                )
+                marker = etree.Comment(_marker_text(len(hidden), sig))
                 run[RUN_KEEP - 1].addnext(marker)
                 marker.tail = run[RUN_KEEP - 1].tail
                 run[RUN_KEEP - 1].tail = None

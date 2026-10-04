@@ -8,6 +8,8 @@ Step 2 — save a snapshot of every site's page.
 
 from __future__ import annotations
 
+import traceback
+
 from django.core.management.base import BaseCommand, CommandError
 
 from scraper.evaluation.cli import add_experiment_arg, get_experiment, pct, site_list
@@ -25,6 +27,9 @@ class Command(BaseCommand):
         parser.add_argument("--kind", choices=["baseline", "natural"], default="baseline")
         parser.add_argument("--label", help="Snapshot label (required for --kind natural, e.g. day14).")
         parser.add_argument("--refresh", action="store_true", help="Re-fetch even if already saved.")
+        parser.add_argument("--reuse-fetched", action="store_true",
+                            help="Rebuild snapshots from pages already downloaded by an earlier "
+                                 "attempt (no new requests); sites never downloaded are fetched.")
 
     def handle(self, *args, **opts):
         exp = get_experiment(opts["experiment"])
@@ -39,10 +44,17 @@ class Command(BaseCommand):
                 continue
             try:
                 snap = capture_snapshot(exp, site, kind=kind, label=label, refresh=opts["refresh"],
-                                        write=self.stdout.write)
+                                        write=self.stdout.write, reuse=opts["reuse_fetched"])
             except EvalError as exc:
                 failures += 1
                 self.stdout.write(self.style.ERROR(f"  FAIL {site['key']}: {exc}"))
+                continue
+            except Exception as exc:  # a bug must not stop the other sites
+                failures += 1
+                tb = traceback.format_exc().strip().splitlines()
+                self.stdout.write(self.style.ERROR(
+                    f"  FAIL {site['key']}: unexpected {type(exc).__name__}: {exc}\n       "
+                    + "\n       ".join(tb[-6:])))
                 continue
             robots = {True: "allowed", False: "DISALLOWED", None: "n/a"}[snap.robots_allowed]
             self.stdout.write(

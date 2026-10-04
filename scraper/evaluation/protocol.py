@@ -21,11 +21,13 @@ is rolled back and the runner stops; re-running resumes where it stopped.
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import sys
 
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
 from ..llm.base import ProviderUnavailable, RateLimitExhausted
 from ..llm.factory import get_provider
@@ -60,6 +62,34 @@ def configure(exp) -> None:
     from ..services.normalizer import set_date_order
 
     set_date_order((exp.config.get("experiment") or {}).get("date_order") or "dmy")
+
+
+LLM_OPTIONS = ("max_input_chars", "reasoning_effort", "include_reasoning", "tokens_per_minute",
+               "completion_counts_in_tpm")
+
+
+def llm_options(llm: dict) -> dict:
+    return {k: llm[k] for k in LLM_OPTIONS if llm.get(k) is not None}
+
+
+def make_provider(exp_cfg: dict):
+    """The experiment's LLM provider with every option from its llm section."""
+    llm = exp_cfg["llm"]
+    return get_provider(llm["provider"], llm.get("model"), **llm_options(llm))
+
+
+def request_plan(exp_cfg: dict, view: str, specs: list, failure_history=None) -> tuple[str, dict, int]:
+    """(prompt, meta, max_completion_tokens) exactly as the provider will build
+    one request — used to audit prompt sizes before spending quota."""
+    from ..llm.prompts import build_prompt, completion_budget, prompt_token_budget
+
+    llm = exp_cfg["llm"]
+    max_tokens = completion_budget(len(specs), llm.get("reasoning_effort"))
+    cap = int(llm.get("max_input_chars") or settings.SCRAPER.get("LLM_MAX_INPUT_CHARS", 60000))
+    budget = prompt_token_budget(llm.get("tokens_per_minute"), max_tokens,
+                                 llm.get("completion_counts_in_tpm", True))
+    prompt, meta = build_prompt(view, specs, failure_history, cap, max_prompt_tokens=budget)
+    return prompt, meta, max_tokens
 
 
 def input_cap(exp) -> int:
@@ -150,7 +180,9 @@ def field_types(site: dict) -> dict:
 # ---------------------------------------------------------------------------
 def capture_snapshot(exp, site: dict, *, kind: str = SnapshotKind.BASELINE,
                      label: str = BASELINE_LABEL, refresh: bool = False,
-                     write=print) -> Snapshot:
+                     write=print, reuse: bool = False) -> Snapshot:
+    """Fetch and save one site's page. ``reuse`` rebuilds the snapshot from
+    the pages already downloaded by an earlier attempt (no new request)."""
     existing = Snapshot.objects.filter(experiment=exp, site_key=site["key"],
                                        kind=kind, label=label).first()
     if existing and not refresh:
@@ -178,7 +210,7 @@ def capture_snapshot(exp, site: dict, *, kind: str = SnapshotKind.BASELINE,
                     f"{site['key']}: robots.txt disallows {site['url']} for this user agent. "
                     "Save the page manually and set html_file, or document why you override it."
                 )
-        status, raw, meta = _fetch_best(site, ua, timeout, exp, kind, label, write)
+        status, raw, meta = _fetch_best(site, ua, timeout, exp, kind, label, write, reuse=reuse)
     snap = snapstore.create_snapshot(
         html=raw, site_key=site["key"], kind=kind, experiment=exp, url=site["url"],
         http_status=status, label=label, fetch_meta=meta, robots_allowed=robots,
@@ -226,7 +258,13 @@ def assess_page(raw: str, site: dict, url: str) -> dict:
     }
 
 
-def _fetch_best(site, ua, timeout, exp, kind, label, write):
+def _fetched_paths(exp, site, kind, label, mode):
+    rel = snapstore._rel(exp, site["key"], f"{kind}_{snapstore.slug(label)}.fetched-{mode}.html")
+    path = snapstore.data_dir() / rel
+    return path, path.with_suffix(".json")
+
+
+def _fetch_best(site, ua, timeout, exp, kind, label, write, reuse=False):
     """Fetch with the site's render mode; with 'auto', fetch both the static
     HTML and the browser-rendered page and keep the one that contains more of
     the annotated values (the annotators read the rendered page). Every
@@ -234,10 +272,23 @@ def _fetch_best(site, ua, timeout, exp, kind, label, write):
     modes = ["static", "js"] if site["render"] == "auto" else [site["render"]]
     candidates, errors = [], {}
     for mode in modes:
-        status, raw, meta = fetch_raw(site["url"], timeout, ua, mode)
-        if meta.get("error") or not raw:
-            errors[mode] = meta.get("error") or "empty page"
-            continue
+        fetched = _fetched_paths(exp, site, kind, label, mode)
+        if reuse and fetched[0].exists() and fetched[1].exists():
+            raw = fetched[0].read_text(encoding="utf-8")
+            status, meta = 200, json.loads(fetched[1].read_text(encoding="utf-8"))
+            status = int(meta.pop("_http_status", 200))
+            meta["reused_fetch"] = True
+        else:
+            status, raw, meta = fetch_raw(site["url"], timeout, ua, mode)
+            if meta.get("error") or not raw:
+                errors[mode] = meta.get("error") or "empty page"
+                continue
+            # Keep exactly what was downloaded before any processing, so a
+            # processing problem never costs a second request to the site.
+            fetched[0].parent.mkdir(parents=True, exist_ok=True)
+            fetched[0].write_text(raw, encoding="utf-8", newline="")
+            meta["fetched_at"] = timezone.now().isoformat()
+            fetched[1].write_text(json.dumps({**meta, "_http_status": status}, indent=1), encoding="utf-8")
         meta["check"] = assess_page(raw, site, meta.get("final_url") or site["url"])
         candidates.append((mode, status, raw, meta))
     if not candidates:
@@ -322,9 +373,7 @@ class EvaluationRunner:
         self.site_keys = sites or [s["key"] for s in self.cfg["sites"]]
         llm = self.ecfg["llm"]
         configure(exp)
-        self.provider = provider or get_provider(llm["provider"], llm.get("model"))
-        if llm.get("max_input_chars") and hasattr(self.provider, "max_input_chars"):
-            self.provider.max_input_chars = int(llm["max_input_chars"])
+        self.provider = provider or make_provider(self.ecfg)
         common = dict(
             provider=self.provider,
             allow_fallback=False,          # never mix heuristic into LLM results
@@ -518,23 +567,23 @@ def estimate(exp: Experiment) -> dict:
     structural = sum(1 for s in ecfg["protocol"]["steps"] if family(s["op"]) == "structural")
     rows, totals = [], {"calls_min": 0, "calls_max": 0, "tokens_min": 0, "tokens_max": 0}
     from ..llm.base import FieldSpec
-    from ..llm.prompts import SYSTEM_PROMPT, build_prompt
+    from ..llm.prompts import SYSTEM_PROMPT
     from ..services import tokens as tok
 
-    cap = input_cap(exp)
     for site in exp.config["sites"]:
         snap = baseline_snapshot(exp, site["key"])
         view = None
+        out_tokens = 0
         if snap is not None:
             page = snapstore.pruned_page(snap, site["prune_keep"])
             specs = [FieldSpec(f["name"], f["description"], f["type"], f["cardinality"])
                      for f in site["fields"]]
-            prompt, _ = build_prompt(page.llm_view, specs, max_html_chars=cap)
+            prompt, _, out_tokens = request_plan(ecfg, page.llm_view, specs)
             view = tok.count_tokens(SYSTEM_PROMPT + prompt)
         calls_min = reps
         calls_max = reps * ((1 + attempts) + structural * attempts)
-        # actual prompt (capped HTML + field list) + room for one XPath per field
-        per_call = (view or 0) + 70 * len(site["fields"])
+        # planned prompt + the completion budget (an upper bound on output)
+        per_call = (view or 0) + out_tokens
         row = {"site": site["key"], "llm_view_tokens": view, "per_call_tokens": per_call if view else None,
                "calls_min": calls_min,
                "calls_max": calls_max,
