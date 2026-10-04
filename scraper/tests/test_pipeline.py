@@ -243,3 +243,19 @@ class SnapshotScoringTests(TempDataDirMixin, TestCase):
         self.assertEqual(run.snapshot.kind, SnapshotKind.LIVE)
         self.assertIn("Nova Smart Watch", snapstore.read_html(run.snapshot))
         self.assertEqual(run.snapshot.sha256, run.raw_html_signature)
+
+
+class TestIsolationTests(TestCase):
+    """A real key in .env must never be used by the test suite."""
+
+    def test_default_provider_is_offline(self):
+        from django.conf import settings
+        from scraper.llm.factory import get_provider_safe
+        self.assertEqual(settings.SCRAPER["LLM_PROVIDER"], "heuristic")
+        self.assertEqual(settings.SCRAPER["GROQ_API_KEY"], "")
+        self.assertEqual(get_provider_safe().name, "heuristic")
+
+    def test_real_http_is_blocked(self):
+        import requests
+        with self.assertRaises(requests.ConnectionError):
+            requests.get("https://api.groq.com/openai/v1/models", timeout=5)
