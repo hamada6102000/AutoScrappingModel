@@ -24,10 +24,10 @@ human intervention.
 
 | Layer | Responsibility | Code |
 |------|-----------------|------|
-| **1. Fetcher** | Fetch raw HTML, strip scripts/styles/comments, prune nav/footer/ads → a token-reduced DOM | `scraper/services/fetcher.py` |
-| **2. LLM Analysis** | Prompt the LLM with the pruned DOM + field schema → one XPath per field | `scraper/services/llm_analyzer.py`, `scraper/llm/` |
-| **3. Validation & Change-Detection** | Apply XPaths, compute a health score (failure rate, field-count mismatch, structural distance), detect layout change | `scraper/services/{extractor,health_monitor,change_detector}.py` |
-| **4. Self-Healing** | On failure, re-invoke the LLM with fresh HTML + failure-history memory → corrected XPaths; bounded retry loop | `scraper/services/self_healer.py`, `scraper/services/pipeline.py` |
+| **1. Fetcher** | Fetch (or load a saved snapshot), strip scripts/styles/comments/hidden/ad blocks and page chrome (keeping an article's own header), whitelist attributes → a clean extraction DOM plus a compressed LLM view | `scraper/services/fetcher.py` |
+| **2. LLM Analysis** | Prompt the LLM with the LLM view + field schema → one XPath per field; each XPath is validated and invalid ones repaired before storing (§4.3 step 3) | `scraper/services/pipeline.py`, `scraper/llm/` |
+| **3. Validation & Change-Detection** | Apply XPaths (single values or lists), type-check values, compute a health score (failure rate, required-field mismatch, structural distance) and two change signals (tag-path and markup distance) | `scraper/services/{extractor,health_monitor,change_detector}.py` |
+| **4. Self-Healing** | On alarm, re-invoke the LLM with the fresh page + failure-history memory → validated corrected XPaths; bounded retry loop; `--no-heal` for the static baseline | `scraper/services/{self_healer,pipeline}.py` |
 
 The orchestrator (`scraper/services/pipeline.py`) wires these into the closed
 loop from **Figure A.1** of the proposal:
@@ -79,11 +79,15 @@ Open the resulting **run detail** page to see the full pipeline trace, the old
 The same flow on the command line:
 
 ```bash
-python manage.py run_scrape --target 1     # v1 → success
-python manage.py simulate_change v2        # redesign the site
-python manage.py run_scrape --target 1     # → self-heals
-python manage.py simulate_change v1        # revert
+python manage.py run_scrape --target 1                 # v1 → success
+python manage.py simulate_change v2                    # redesign the site
+python manage.py run_scrape --target 1 --no-heal       # static baseline: detects, does not repair
+python manage.py run_scrape --target 1                 # → self-heals
+python manage.py simulate_change v1                    # revert
 ```
+
+`run_scrape` options: `--provider groq`, `--model <id>`, `--no-heal`,
+`--no-fallback`. Every live run saves its page as a snapshot under `eval_data/live/`.
 
 ---
 
@@ -120,8 +124,11 @@ API — no extra Python package required.
    ```
 
 Default model is `llama-3.3-70b-versatile`; `llama-3.1-8b-instant` is faster and
-lighter on the free rate limits. If a key is missing or invalid the pipeline
-safely falls back to the heuristic provider (it never crashes).
+lighter on the free rate limits. Rate limits (HTTP 429) are handled by waiting
+and retrying; the waiting time is logged separately from latency. For ordinary
+runs, an LLM failure falls back to the heuristic for that call and is flagged
+(`fallback_used`); the evaluation never falls back, so LLM results are never
+mixed with heuristic ones.
 
 > ℹ️ **About Claude access.** The `anthropic` provider uses the **Anthropic API**
 > (a key from **console.anthropic.com**, billed separately). A **claude.ai
@@ -138,24 +145,31 @@ All providers implement the same `LLMProvider` interface
 ```
 config/                 Django project (settings, urls) — thresholds live in SCRAPER{}
 scraper/                Core app (Models + services + LLM providers)
-  models.py             ScrapeTarget, TargetField, XPathRule, ScrapeRun,
-                        ExtractedRecord, ChangeEvent, FailureRecord, LLMCallLog
-  llm/                  Pluggable provider layer
-    base.py             LLMProvider interface + data structures
-    heuristic.py        Offline provider (default)
-    groq_provider.py    Free LLaMA provider (Groq, OpenAI-compatible)
-    anthropic_provider.py / openai_provider.py / ollama_provider.py
-    prompts.py          Prompt construction + JSON parsing
-    factory.py          Resolve provider from settings
+  models.py             ScrapeTarget, TargetField, XPathRule, ScrapeRun, ExtractedRecord,
+                        ChangeEvent, FailureRecord, LLMCallLog, Experiment, Snapshot, GroundTruth
+  llm/                  Pluggable provider layer (base, heuristic, groq, anthropic,
+                        openai, ollama, prompts, factory, errors)
   services/             The four layers + orchestrator
-    fetcher.py normalizer.py extractor.py
-    llm_analyzer.py health_monitor.py change_detector.py self_healer.py
-    pipeline.py         Closed-loop orchestrator
-  management/commands/  seed_demo, run_scrape, simulate_change
-  tests/                Unit + integration tests (incl. the full heal loop)
+    fetcher.py          cleaning / pruning, clean DOM + LLM view, fetching
+    extractor.py        XPath evaluation, list fields, type validation
+    normalizer.py       value normalisation (US/EU/Arabic numbers, dates)
+    matching.py         ground-truth matching (exact, token F1, lists)
+    change_detector.py  structural and markup distance
+    health_monitor.py   health score
+    mutations.py        seeded simulated layout changes
+    snapshots.py        snapshot storage + labeling views
+    tokens.py           token counting (tiktoken)
+    pipeline.py         closed-loop orchestrator
+  evaluation/           20-site evaluation harness (config, protocol, ground-truth
+                        sheets, metrics, report, export, external baselines)
+  management/commands/  seed_demo, run_scrape, simulate_change, eval_init,
+                        eval_snapshot, eval_gt_template, eval_gt_import, eval_check,
+                        eval_run, eval_report, eval_import_predictions, export_results
+  tests/                Unit + integration tests (84)
 dashboard/              Web UI (Controllers + Templates) — the "V" + "C" of MVC
 demopages/              Self-contained demo product page (v1 / v2 fixtures)
-docs/ARCHITECTURE.md    Deeper design notes + thesis mapping
+eval/sites.example.yaml Template for your evaluation sites
+docs/                   ARCHITECTURE.md, EVALUATION.md (runbook + metric definitions)
 ```
 
 The research core (`scraper/services` + `scraper/llm`) is deliberately
@@ -170,39 +184,38 @@ be unit-tested and reused outside the web app.
 python manage.py test scraper
 ```
 
-Covers DOM pruning, the heuristic generator, value normalization, health scoring,
-change detection, and the **end-to-end self-healing loop** (v1 success → v2
-detection → regeneration → recovery).
+Covers pruning, tokens, normalisation, ground-truth matching, extraction, change
+detection, mutations, the Groq provider (rate limits, quota, oversized prompts),
+the pipeline (validation repair, `--no-heal`, fallback tracking, cost) and the
+full evaluation harness (paired runs, quota stop and resume, report, export).
+All tests run offline.
 
 ---
 
-## How the metrics map to the proposal
+## Evaluation on real websites (the paper's results)
 
-| Proposal metric (Table 5.1) | Where it appears |
-|-----------------------------|------------------|
-| Initial extraction accuracy (F1 vs ground truth) | `ExtractedRecord.matches_ground_truth`, run detail |
-| Self-healing success rate | `ChangeEvent.resolution == auto_healed` |
-| Time-to-recovery | `ChangeEvent.time_to_recovery_ms` |
-| XPath regeneration latency | `ScrapeRun.heal_latency_ms`, `LLMCallLog.latency_ms` |
-| Health score / failure rate | `ScrapeRun.health_score`, `xpath_failure_rate` |
-| Structural (tree-edit) distance | `ScrapeRun.structural_distance` |
-| LLM token usage | `ScrapeRun.token_usage`, `LLMCallLog` |
+The harness runs the proposal's evaluation on your own sites and produces every
+metric in Table 5.1 and RQ1–RQ5 from stored runs. Nothing is estimated. Full
+runbook: **[docs/EVALUATION.md](docs/EVALUATION.md)**.
 
----
+```bat
+copy eval\sites.example.yaml eval\sites.yaml     &  rem list your 20 pages
+python manage.py eval_init --config eval\sites.yaml
+python manage.py eval_snapshot                    &  rem save every page
+python manage.py eval_gt_template                 &  rem Excel sheet to label
+python manage.py eval_gt_import --file eval_data\ieee-2026\ground_truth_baseline.xlsx
+python manage.py eval_check --ping                &  rem readiness + key test
+python manage.py eval_run                         &  rem resumable
+python manage.py eval_report
+python manage.py export_results                   &  rem one zip with everything
+```
 
-## Extending toward the full thesis evaluation
-
-This scaffold implements the complete closed loop on a controlled demo. Natural
-next steps for the thesis experiments:
-
-- Add the 20+ real-world targets (e-commerce, news, finance, jobs, academic) via
-  the admin (`/admin/`) or a fixture, each with its field schema + ground truth.
-- Wire a real LLM provider and compare against the heuristic baseline.
-- Add a scheduler (e.g. Celery beat / `cron` calling `run_scrape --all`) for the
-  continuous-monitoring evaluation period.
-- Replace the skeleton-based structural distance with a full tree-edit-distance
-  implementation if finer change characterisation is needed.
-- Export runs/records to compute F1-over-time and the baseline comparison tables.
+Design: for each site and repetition, the self-healing system and a static
+copy of its t0 rules (no healing) run on the same seeded sequence of simulated
+layout changes; optional natural re-fetches add real changes. Every run records
+values before and after healing, health, change signals, and every LLM call
+(tokens, latency, rate-limit waits, failure-memory length, raw response), all
+scored against human labels.
 
 ---
 

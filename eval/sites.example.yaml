@@ -1,0 +1,126 @@
+# =============================================================================
+# Evaluation configuration — copy this file to eval/sites.yaml and edit it.
+#
+#   copy eval\sites.example.yaml eval\sites.yaml        (Windows)
+#
+# Every URL below is a PLACEHOLDER. Replace the example sites with your 20 real
+# pages (one specific page per site: a product page, an article, a job ad...).
+# =============================================================================
+
+experiment:
+  name: ieee-2026                 # letters/digits/-; results go to eval_data/<name>/
+  description: Self-healing scraper evaluation on 20 real websites
+
+  llm:
+    provider: groq                # groq | anthropic | openai | ollama | heuristic
+    model: llama-3.3-70b-versatile  # leave out to use the provider's default
+
+  # Pipeline parameters (proposal Table 5.1 / Section 3)
+  health_threshold: 0.80          # self-healing triggers below this health score
+  max_heal_attempts: 3            # bounded regeneration loop
+  failure_memory_size: 10         # failed XPaths fed back to the LLM
+
+  # Experimental design
+  repetitions: 3                  # independent repeats per site (different seeds)
+  seed: 20261004                  # change only if you want a different random design
+  conditions: [self_healing, static]   # static = same LLM rules, no healing (RQ3)
+
+  # Simulated layout changes (proposal 4.1). Each repetition applies these
+  # steps cumulatively, in a seeded random order. Operators:
+  #   structural: rename_classes, rename_ids, wrap_elements, retag_elements,
+  #               reorder_siblings, insert_sibling, redesign, insert_banner
+  #   content:    perturb_numbers (e.g. price changes; labels updated automatically)
+  #   control:    control (identical page)
+  # focus: true limits the change to the region around the labelled values.
+  protocol:
+    severities: [0.3, 0.6, 1.0]   # fraction of eligible elements changed
+    shuffle: true
+    steps:
+      - {op: rename_classes, focus: true}
+      - {op: insert_banner, focus: false}
+      - {op: wrap_elements, focus: true}
+      - {op: perturb_numbers}
+      - {op: retag_elements, focus: true}
+      - {op: control}
+      - {op: redesign, focus: true}
+      - {op: insert_sibling, focus: true}
+
+  fetch:
+    user_agent: "SelfHealingScraper/1.0 (+academic research; Fayoum University)"
+    timeout: 30
+    respect_robots: true          # pages disallowed by robots.txt are not fetched
+
+  list_correct_f1: 0.9            # a list field counts as correct at item-F1 >= 0.9
+
+# -----------------------------------------------------------------------------
+# Sites. For each field:
+#   name         lowercase id (title, price, author, ...)
+#   type         string | price | number | date | url
+#   cardinality  single (default) | many  (e.g. every price on a category page)
+#   required     true (default) | false   (required fields weigh more in health)
+#   description  a short hint for the LLM ("the current selling price")
+# Optional per site:
+#   render: js         page needs JavaScript (requires Playwright)
+#   html_file: path    use a page you saved yourself (for bot-protected sites)
+#   prune_keep: [aside, nav]   keep containers the pruner would remove
+# -----------------------------------------------------------------------------
+sites:
+
+  - key: shop-a                               # unique id, lowercase
+    name: Example Shop - product page
+    url: https://www.example-shop.com/products/12345     # REPLACE
+    category: ecommerce
+    fields:
+      - {name: title, type: string, description: product name}
+      - {name: price, type: price, description: current selling price}
+      - {name: availability, type: string, description: stock / availability status}
+      - {name: rating, type: number, required: false, description: average customer rating}
+
+  - key: shop-b-listing
+    name: Example Store - category page (list fields)
+    url: https://www.example-store.com/category/laptops   # REPLACE
+    category: ecommerce
+    render: js                                # only if the list loads via JavaScript
+    fields:
+      - {name: titles, type: string, cardinality: many, description: every product name in the grid}
+      - {name: prices, type: price, cardinality: many, description: every product price in the grid}
+
+  - key: news-a
+    name: Example News - article
+    url: https://www.example-news.com/2026/09/some-article  # REPLACE
+    category: news
+    fields:
+      - {name: headline, type: string, description: article headline}
+      - {name: author, type: string, description: author name}
+      - {name: date, type: date, description: publication date}
+
+  - key: finance-a
+    name: Example Markets - stock quote
+    url: https://www.example-markets.com/quote/ACME     # REPLACE
+    category: finance
+    fields:
+      - {name: symbol, type: string, description: ticker symbol}
+      - {name: price, type: price, description: last traded price}
+      - {name: change, type: string, description: percentage change today}
+
+  - key: jobs-a
+    name: Example Jobs - job posting
+    url: https://www.example-jobs.com/jobs/98765        # REPLACE
+    category: jobs
+    prune_keep: [aside]                       # details live in a sidebar on this site
+    fields:
+      - {name: title, type: string, description: job title}
+      - {name: company, type: string, description: hiring company}
+      - {name: location, type: string, description: job location}
+      - {name: salary, type: price, required: false, description: salary if shown}
+
+  - key: academic-a
+    name: Example Library - paper page (saved locally)
+    url: https://www.example-library.org/paper/42       # REPLACE (kept for reference)
+    category: academic
+    html_file: saved_pages/academic-a.html    # relative to this file; see EVALUATION.md
+    fields:
+      - {name: title, type: string, description: paper title}
+      - {name: authors, type: string, cardinality: many, description: every author name}
+      - {name: venue, type: string, description: conference or journal name}
+      - {name: abstract, type: string, required: false, description: abstract text}

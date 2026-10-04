@@ -1,8 +1,9 @@
 """
 Value normalization (proposal Section 4.3, step 4 — Value Normalization).
 
-Strips whitespace, decodes HTML entities, unifies numeric/price formats, and
-standardises dates to ISO 8601 (best-effort, dependency-free).
+Strips whitespace, decodes HTML entities, maps Arabic-Indic / Persian digits
+to ASCII, unifies numeric/price formats (US "1,149.99", European "1.149,99",
+Arabic "١٬١٤٩٫٩٩"), and standardises dates to ISO 8601 where possible.
 """
 
 from __future__ import annotations
@@ -12,34 +13,54 @@ import re
 from datetime import datetime
 
 _WS_RE = re.compile(r"\s+")
-_PRICE_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*")
+_NUM_RE = re.compile(r"[-+]?\d[\d.,'   ]*\d|[-+]?\d")
+_DIGITS = str.maketrans(
+    "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫٬",
+    "01234567890123456789.,",
+)
 _DATE_FORMATS = [
     "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%B %d, %Y", "%b %d, %Y",
-    "%d %B %Y", "%d %b %Y", "%Y/%m/%d", "%d-%m-%Y",
+    "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y", "%Y/%m/%d", "%d-%m-%Y",
+    "%d.%m.%Y", "%b. %d, %Y", "%A, %B %d, %Y",
 ]
 
 
-def _collapse(value: str) -> str:
-    return _WS_RE.sub(" ", html.unescape(value or "")).strip()
+def clean_text(value: str) -> str:
+    text = html.unescape(value or "").translate(_DIGITS)
+    return _WS_RE.sub(" ", text).strip()
+
+
+def parse_number(text: str) -> str | None:
+    """Return a plain decimal string ('1149.99') or None if no number found."""
+    match = _NUM_RE.search(clean_text(text))
+    if not match:
+        return None
+    s = re.sub(r"[\s'  ]", "", match.group(0))
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):      # 1.149,99
+            s = s.replace(".", "").replace(",", ".")
+        else:                                 # 1,149.99
+            s = s.replace(",", "")
+    elif "," in s:
+        if re.fullmatch(r"[-+]?\d{1,3}(,\d{3})+", s):   # 1,149 (thousands)
+            s = s.replace(",", "")
+        else:                                            # 149,99 (decimal)
+            s = s.replace(",", ".")
+    elif s.count(".") > 1:                    # 1.149.000
+        s = s.replace(".", "")
+    return s
 
 
 def normalize(value: str, field_type: str = "string") -> str:
     """Normalise ``value`` according to its declared field type."""
-    text = _collapse(value)
+    text = clean_text(value)
     if not text:
         return ""
-
-    if field_type == "price":
-        match = _PRICE_RE.search(text.replace(",", ""))
-        return match.group(0) if match else text
-
-    if field_type == "number":
-        match = _PRICE_RE.search(text.replace(",", ""))
-        return match.group(0) if match else text
-
+    if field_type in ("price", "number"):
+        number = parse_number(text)
+        return number if number is not None else text
     if field_type == "date":
         return _normalize_date(text)
-
     return text
 
 
@@ -50,6 +71,5 @@ def _normalize_date(text: str) -> str:
             return datetime.strptime(candidate, fmt).date().isoformat()
         except ValueError:
             continue
-    # Try to salvage an ISO-like prefix (e.g. "2026-01-15T10:00").
     iso = re.match(r"(\d{4}-\d{2}-\d{2})", candidate)
     return iso.group(1) if iso else candidate

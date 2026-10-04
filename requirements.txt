@@ -1,17 +1,23 @@
 # Core
 Django==5.1.15
-lxml==6.1.2
+lxml==6.1.3
 requests==2.34.2
-python-dotenv==1.2.3
+python-dotenv==1.2.4
+
+# Evaluation harness
+PyYAML==6.0.3        # eval/sites.yaml
+openpyxl==3.1.5      # ground-truth labelling sheets (.xlsx)
+tiktoken==0.14.0     # exact token counts for the pruning metric (downloads its
+                     # vocabulary once on first use; needs internet that one time)
 
 # LLM providers
-# Anthropic / Claude is the primary real provider. Requires an Anthropic API
-# key (ANTHROPIC_API_KEY) — separate from a claude.ai chat subscription.
-anthropic==1.2.0
+# Groq (FREE, used for the evaluation) needs NO extra package — it uses
+# `requests` against Groq's OpenAI-compatible API. Set GROQ_API_KEY.
+# Anthropic / Claude needs an Anthropic API key (separate from claude.ai).
+anthropic==1.11.0
 
-# Groq (FREE, recommended) needs NO extra package — it uses `requests` against
-# Groq's OpenAI-compatible API. Just set GROQ_API_KEY (free at console.groq.com).
-
-# Optional providers — uncomment to enable:
-# openai>=1.0            # for SCRAPER_LLM_PROVIDER=openai
+# Optional — uncomment if needed:
+# openai>=1.0            # SCRAPER_LLM_PROVIDER=openai
+# playwright>=1.45       # sites with `render: js` (then: python -m playwright install chromium)
+# scipy>=1.11            # adds a Wilcoxon signed-rank p-value to the report
 # (Ollama needs no Python package; it talks to a local Ollama server over HTTP.)

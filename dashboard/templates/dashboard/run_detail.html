@@ -66,22 +66,43 @@
     </table>
   </div>
 
+  {% if pre_heal_records %}
+    <h2>Before healing</h2>
+    <div class="panel">
+      <table>
+        <thead><tr><th>Field</th><th>Value</th><th>Reason</th><th>XPath that failed</th></tr></thead>
+        <tbody>
+          {% for rec in pre_heal_records %}
+            <tr>
+              <td><strong>{{ rec.field.name }}</strong></td>
+              <td>{{ rec.normalized_value|default:"—" }}</td>
+              <td class="muted">{{ rec.reason|default:"ok" }}</td>
+              <td>{% if rec.xpath_used %}<code>{{ rec.xpath_used.xpath }}</code>{% else %}<span class="muted">—</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
   <div class="grid" style="grid-template-columns:1fr 1fr">
     <div>
       <h2>LLM / generator calls</h2>
       <div class="panel">
         <table>
-          <thead><tr><th>Provider</th><th>Purpose</th><th>Tokens</th><th>Latency</th></tr></thead>
+          <thead><tr><th>Provider</th><th>Purpose</th><th>Tokens</th><th>Latency</th><th>Memory</th></tr></thead>
           <tbody>
             {% for c in llm_calls %}
               <tr>
-                <td>{{ c.provider }}<div class="muted" style="font-size:11px">{{ c.model }}</div></td>
-                <td>{{ c.get_purpose_display }}</td>
-                <td>{{ c.total_tokens }}</td>
-                <td>{{ c.latency_ms }} ms</td>
+                <td>{{ c.provider }}{% if c.fallback_used %} <span class="pill degraded">fallback</span>{% endif %}
+                  <div class="muted" style="font-size:11px">{{ c.model }}{% if c.error %} · {{ c.error|truncatechars:60 }}{% endif %}</div></td>
+                <td>{{ c.get_purpose_display }}{% if c.attempt %} #{{ c.attempt }}{% endif %}</td>
+                <td>{{ c.prompt_tokens }}+{{ c.completion_tokens }}</td>
+                <td>{{ c.latency_ms }} ms{% if c.rate_limit_wait_ms %}<div class="muted" style="font-size:11px">+{{ c.rate_limit_wait_ms }} ms wait</div>{% endif %}</td>
+                <td>{{ c.failure_history_len }}</td>
               </tr>
             {% empty %}
-              <tr><td colspan="4" class="muted">No calls.</td></tr>
+              <tr><td colspan="5" class="muted">No calls.</td></tr>
             {% endfor %}
           </tbody>
         </table>

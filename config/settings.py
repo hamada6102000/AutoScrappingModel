@@ -7,6 +7,7 @@ scraping architecture described in the research proposal.
 """
 
 from pathlib import Path
+import json
 import os
 
 from dotenv import load_dotenv
@@ -94,7 +95,9 @@ WSGI_APPLICATION = "config.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        # Override with DJANGO_DB_PATH, e.g. to open the database from an
+        # exported results bundle and recompute the report.
+        "NAME": os.getenv("DJANGO_DB_PATH") or (BASE_DIR / "db.sqlite3"),
     }
 }
 
@@ -161,4 +164,34 @@ SCRAPER = {
         "SCRAPER_USER_AGENT",
         "SelfHealingScraper/1.0 (+research; Fayoum University)",
     ),
+
+    # Where snapshots, ground-truth sheets and evaluation results are written.
+    "DATA_DIR": os.getenv("SCRAPER_DATA_DIR", str(BASE_DIR / "eval_data")),
+
+    # Save the raw HTML of every live (non-evaluation) run as a snapshot.
+    "SAVE_SNAPSHOTS": env_bool("SCRAPER_SAVE_SNAPSHOTS", True),
+
+    # If the real LLM fails (rate limit, network, bad key), fall back to the
+    # offline heuristic for that call. The evaluation turns this OFF so that
+    # LLM results are never silently mixed with heuristic ones.
+    "ALLOW_FALLBACK": env_bool("SCRAPER_ALLOW_FALLBACK", True),
+
+    # Upper bound on the pruned HTML characters sent to the LLM. Anything cut
+    # is flagged (llm_input_truncated) so it can be reported.
+    "LLM_MAX_INPUT_CHARS": env_int("SCRAPER_LLM_MAX_INPUT_CHARS", 60000),
+
+    # Rate-limit handling for remote LLM APIs (HTTP 429). Waiting time is
+    # recorded separately and excluded from latency metrics.
+    "LLM_MAX_RETRIES": env_int("SCRAPER_LLM_MAX_RETRIES", 6),
+    "LLM_MAX_WAIT_SECONDS": env_int("SCRAPER_LLM_MAX_WAIT_SECONDS", 900),
+
+    # Optional price table for cost estimates, USD per 1M tokens, e.g.
+    # SCRAPER_PRICING='{"llama-3.3-70b-versatile": {"input": 0.59, "output": 0.79}}'
+    # Left empty, costs are reported as unknown (only token counts are used).
+    "PRICING": json.loads(os.getenv("SCRAPER_PRICING", "{}") or "{}"),
+
+    # Tokenizer used to count tokens of pages that are never sent to the LLM
+    # (raw HTML). Falls back to a chars/4 estimate if unavailable, and the
+    # choice is recorded with every snapshot.
+    "TOKENIZER": os.getenv("SCRAPER_TOKENIZER", "cl100k_base"),
 }

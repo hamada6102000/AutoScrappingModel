@@ -14,6 +14,8 @@ from django.shortcuts import get_object_or_404, redirect, render
 from demopages import state
 from scraper.models import (
     ChangeEvent,
+    Experiment,
+    RecordPhase,
     RunStatus,
     ScrapeRun,
     ScrapeTarget,
@@ -22,7 +24,12 @@ from scraper.services.pipeline import ScrapePipeline
 
 
 def target_list(request):
-    targets = ScrapeTarget.objects.prefetch_related("fields", "runs").all()
+    # Evaluation targets (one per site x condition x repetition) are summarised
+    # per experiment below instead of being listed individually.
+    show_eval = request.GET.get("eval") == "1"
+    targets = ScrapeTarget.objects.prefetch_related("fields", "runs")
+    if not show_eval:
+        targets = targets.filter(experiment__isnull=True)
     runs = ScrapeRun.objects.all()
     stats = {
         "targets": targets.count(),
@@ -31,9 +38,16 @@ def target_list(request):
         "change_events": ChangeEvent.objects.count(),
         "avg_health": runs.aggregate(v=Avg("health_score"))["v"] or 0.0,
     }
+    experiments = Experiment.objects.annotate(
+        n_targets=Count("targets", distinct=True),
+        n_runs=Count("runs", distinct=True),
+        n_snapshots=Count("snapshots", distinct=True),
+    )
     context = {
         "targets": targets,
         "stats": stats,
+        "experiments": experiments,
+        "show_eval": show_eval,
         "active_version": state.get_active_version(),
     }
     return render(request, "dashboard/target_list.html", context)
@@ -65,10 +79,12 @@ def run_detail(request, pk: int):
     run = get_object_or_404(
         ScrapeRun.objects.select_related("target"), pk=pk
     )
+    records = run.records.select_related("field", "xpath_used")
     context = {
         "run": run,
-        "records": run.records.select_related("field", "xpath_used").all(),
-        "llm_calls": run.llm_calls.all(),
+        "records": records.filter(phase=RecordPhase.FINAL),
+        "pre_heal_records": records.filter(phase=RecordPhase.PRE_HEAL),
+        "llm_calls": run.llm_calls.order_by("created_at", "id"),
         "failures": run.failures.select_related("field").all(),
         "change_events": run.change_events.all(),
     }

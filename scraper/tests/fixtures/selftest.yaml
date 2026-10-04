@@ -1,0 +1,66 @@
+# Harness self-test configuration: five local fixture pages, offline
+# heuristic provider. Used only to verify the evaluation machinery works —
+# these are NOT research results.
+experiment:
+  name: selftest
+  description: Harness self-test on local fixture pages (not paper data)
+  llm:
+    provider: heuristic
+  repetitions: 2
+  seed: 1234
+  conditions: [self_healing, static]
+  fetch:
+    respect_robots: false
+
+sites:
+  - key: shop-product
+    name: TestShop product page
+    url: https://shop.example.test/p/nova
+    category: ecommerce
+    html_file: pages/shop_product.html
+    fields:
+      - {name: name, type: string, description: product name}
+      - {name: price, type: price, description: current price}
+      - {name: availability, type: string, description: stock status}
+      - {name: rating, type: number, required: false, description: average rating}
+      - {name: brand, type: string, required: false, description: brand name}
+
+  - key: news-article
+    name: Daily Test Gazette article
+    url: https://news.example.test/transit
+    category: news
+    html_file: pages/news_article.html
+    fields:
+      - {name: headline, type: string, description: article headline}
+      - {name: author, type: string, description: author name}
+      - {name: date, type: date, description: publication date}
+
+  - key: job-posting
+    name: TestJobs posting
+    url: https://jobs.example.test/123
+    category: jobs
+    html_file: pages/job_posting.html
+    fields:
+      - {name: title, type: string, description: job title}
+      - {name: company, type: string, description: hiring company}
+      - {name: location, type: string, description: job location}
+      - {name: salary, type: price, required: false, description: salary}
+
+  - key: finance-quote
+    name: ACME quote
+    url: https://finance.example.test/acme
+    category: finance
+    html_file: pages/finance_quote.html
+    fields:
+      - {name: symbol, type: string, description: ticker symbol}
+      - {name: price, type: price, description: last price}
+      - {name: change, type: string, description: percentage change}
+
+  - key: category-listing
+    name: TestStore category page
+    url: https://store.example.test/furniture
+    category: ecommerce
+    html_file: pages/category_listing.html
+    fields:
+      - {name: title, type: string, cardinality: many, description: every product title}
+      - {name: price, type: price, cardinality: many, description: every product price}

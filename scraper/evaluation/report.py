@@ -1,0 +1,713 @@
+"""
+Evaluation report: proposal Table 5.1 metrics, RQ1-RQ5, token reduction,
+cost and LLM reliability — all computed from the database, nothing assumed.
+
+Key definitions (also written into report.md):
+
+* correct field  — see metrics.is_correct (lists: item F1 >= list_correct_f1).
+* breaking change at step k (per condition) — at least one field that was
+  correct at step k-1 is not correct at step k *before* any healing.
+* alarm — the system's own detector fired (pre-heal health < threshold).
+* self-healing success (GT-verified) — every field broken at step k is
+  correct again after healing at step k.
+* false alarm — an alarm on a step that was not breaking.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+from collections import defaultdict
+from pathlib import Path
+
+from ..models import (
+    ChangeEvent, ExtractedRecord, GroundTruth, LLMCallLog, LLMPurpose,
+    RecordPhase, ScrapeRun, Snapshot, SnapshotKind,
+)
+from . import metrics as M
+
+TARGETS = {
+    "initial_f1": 0.85,
+    "healing_success_rate": 0.80,
+    "time_to_recovery_s": 60.0,
+    "regeneration_latency_s": 30.0,
+    "sustained_f1": 0.80,
+    "false_positive_rate": 0.05,
+}
+THRESHOLDS = (0.01, 0.05, 0.10, 0.20)
+
+
+# ---------------------------------------------------------------------------
+# Collection
+# ---------------------------------------------------------------------------
+def collect(exp) -> dict:
+    cfg = exp.config
+    site_cat = {s["key"]: s["category"] for s in cfg["sites"]}
+    site_fields = {s["key"]: [f["name"] for f in s["fields"]] for s in cfg["sites"]}
+    has_gt = {
+        (g.snapshot_id, g.field_name)
+        for g in GroundTruth.objects.filter(snapshot__experiment=exp)
+        if not (g.notes or "").startswith("exclude")
+    }
+    runs = {}
+    for r in ScrapeRun.objects.filter(experiment=exp, completed=True).select_related("target", "snapshot"):
+        mut = (r.snapshot.mutation if r.snapshot_id else {}) or {}
+        runs[r.id] = {
+            "id": r.id, "site": r.target.site_key, "category": site_cat.get(r.target.site_key, "other"),
+            "condition": r.condition, "rep": r.repetition, "step": r.step, "kind": r.step_kind,
+            "true_change": r.true_change, "status": r.status, "detected": r.detected,
+            "healed": r.healed, "health": r.health_score,
+            "pre_health": r.pre_heal_health if r.pre_heal_health is not None else r.health_score,
+            "pre_failure_rate": r.pre_heal_failure_rate if r.pre_heal_failure_rate is not None else r.xpath_failure_rate,
+            "pre_field_mismatch": r.pre_heal_field_mismatch if r.pre_heal_field_mismatch is not None else r.field_count_mismatch,
+            "structural": r.structural_distance, "markup": r.markup_distance,
+            "heal_attempts": r.heal_attempts, "llm_calls": r.llm_calls_count,
+            "llm_errors": r.llm_errors, "fallback": r.fallback_used,
+            "prompt_tokens": r.prompt_tokens, "completion_tokens": r.completion_tokens,
+            "cost": r.cost_usd, "wait_ms": r.rate_limit_wait_ms, "duration_ms": r.duration_ms,
+            "heal_latency_ms": r.heal_latency_ms, "truncated": r.llm_input_truncated,
+            "snapshot_id": r.snapshot_id, "op": mut.get("op", "baseline" if r.step == 0 else ""),
+            "family": mut.get("family", ""), "severity": mut.get("severity"),
+            "focus": mut.get("focus"), "affected": mut.get("affected"),
+        }
+    records = []
+    qs = ExtractedRecord.objects.filter(run__experiment=exp, run__completed=True).select_related("field")
+    for rec in qs:
+        run = runs.get(rec.run_id)
+        if run is None:
+            continue
+        records.append({
+            "run_id": rec.run_id, "phase": rec.phase, "field": rec.field.name,
+            "cardinality": rec.field.cardinality, "type": rec.field.field_type,
+            "required": rec.field.is_required, "success": rec.success, "reason": rec.reason,
+            "gt_available": rec.gt_available, "exact_match": rec.exact_match,
+            "token_f1": rec.token_f1, "list_tp": rec.list_tp, "list_fp": rec.list_fp,
+            "list_fn": rec.list_fn, "n_values": len(rec.values or []),
+            "has_gt": (run["snapshot_id"], rec.field.name) in has_gt,
+            "value": (rec.normalized_value or "")[:300], "gt_value": (rec.gt_value or "")[:300],
+            "site": run["site"], "category": run["category"], "condition": run["condition"],
+            "rep": run["rep"], "step": run["step"],
+        })
+    events = [{
+        "run_id": e.run_id, "resolution": e.resolution, "attempts": e.attempts,
+        "history_len": e.failure_history_len, "ttr_ms": e.time_to_recovery_ms,
+        "ttr_excl_ms": e.time_to_recovery_excl_wait_ms, "affected": e.affected_fields,
+        "recovered": e.fields_recovered, "unrecovered": e.fields_unrecovered,
+        "structural": e.structural_distance, "markup": e.markup_distance,
+    } for e in ChangeEvent.objects.filter(run__experiment=exp, run__completed=True)]
+    calls = [{
+        "run_id": c.run_id, "provider": c.provider, "requested": c.requested_provider,
+        "fallback": c.fallback_used, "model": c.model, "purpose": c.purpose,
+        "attempt": c.attempt, "history_len": c.failure_history_len,
+        "fields_requested": c.fields_requested, "returned": c.xpaths_returned,
+        "valid": c.xpaths_valid, "prompt_tokens": c.prompt_tokens,
+        "completion_tokens": c.completion_tokens, "cost": c.cost_usd,
+        "latency_ms": c.latency_ms, "validation_ms": c.validation_ms,
+        "wait_ms": c.rate_limit_wait_ms, "retries": c.retries,
+        "truncated": c.input_truncated, "success": c.success, "error": c.error,
+    } for c in LLMCallLog.objects.filter(run__experiment=exp, run__completed=True)]
+    baselines = [{
+        "site": s.site_key, "category": site_cat.get(s.site_key, "other"),
+        "http_status": s.http_status, "robots_allowed": s.robots_allowed,
+        "tokenizer": s.tokenizer, "raw_tokens": s.raw_tokens, "clean_tokens": s.clean_tokens,
+        "llm_view_tokens": s.llm_view_tokens, "view_truncated": s.llm_view_truncated,
+        "reduction": s.token_reduction, "presence": s.field_presence,
+        "suspected_block": (s.fetch_meta or {}).get("suspected_block"),
+    } for s in Snapshot.objects.filter(experiment=exp, kind=SnapshotKind.BASELINE)]
+    return {"runs": runs, "records": records, "events": events, "calls": calls,
+            "baselines": baselines, "site_fields": site_fields,
+            "list_threshold": cfg["experiment"].get("list_correct_f1", 0.9)}
+
+
+# ---------------------------------------------------------------------------
+# Derived labels
+# ---------------------------------------------------------------------------
+def label_breaking(data: dict) -> None:
+    thr = data["list_threshold"]
+    final, pre = {}, {}
+    for rec in data["records"]:
+        key = (rec["run_id"], rec["field"])
+        value = M.is_correct(rec, thr)
+        (final if rec["phase"] == RecordPhase.FINAL else pre)[key] = value
+    data["final_correct"] = final
+    index = {(r["condition"], r["site"], r["rep"], r["step"]): r for r in data["runs"].values()}
+    for run in data["runs"].values():
+        run["breaking"] = None
+        run["broken_fields"] = []
+        run["gt_recovered"] = None
+        run["prev_clean"] = None
+        fields = data["site_fields"].get(run["site"], [])
+        now = {f: pre.get((run["id"], f), final.get((run["id"], f))) for f in fields}
+        labelled_now = [v for v in now.values() if v is not None]
+        # degraded: some field is actually wrong before healing at this step
+        # (regardless of when it broke) — the ground truth for failure alarms.
+        run["degraded"] = (False in labelled_now) if labelled_now else None
+        if not run["step"]:
+            continue
+        prev = index.get((run["condition"], run["site"], run["rep"], run["step"] - 1))
+        if prev is None:
+            continue
+        before = {f: final.get((prev["id"], f)) for f in fields}
+        labelled_before = [v for v in before.values() if v is not None]
+        # prev_clean: every labelled field was correct when this step began, so
+        # an alarm here can only be caused by this step's change (RQ1).
+        run["prev_clean"] = bool(labelled_before) and all(labelled_before)
+        broken = [f for f in fields if before.get(f) is True and now.get(f) is False]
+        run["breaking"] = bool(broken)
+        run["broken_fields"] = broken
+        if broken:
+            run["gt_recovered"] = all(final.get((run["id"], f)) is True for f in broken)
+            run["fields_recovered"] = sum(1 for f in broken if final.get((run["id"], f)) is True)
+
+
+# ---------------------------------------------------------------------------
+# Sections
+# ---------------------------------------------------------------------------
+def _recs(data, *, phase=RecordPhase.FINAL, condition=None, step=None, rep_min=1,
+          rep_eq=None, sites=None):
+    out = []
+    for r in data["records"]:
+        if r["phase"] != phase:
+            continue
+        if condition is not None and r["condition"] != condition:
+            continue
+        if step is not None and r["step"] != step:
+            continue
+        if rep_eq is not None:
+            if r["rep"] != rep_eq:
+                continue
+        elif rep_min is not None and (r["rep"] is None or r["rep"] < rep_min):
+            continue
+        if sites is not None and r["site"] not in sites:
+            continue
+        out.append(r)
+    return out
+
+
+def _runs(data, *, condition=None, step_min=None, rep_min=1, rep_eq=None):
+    out = []
+    for r in data["runs"].values():
+        if condition is not None and r["condition"] != condition:
+            continue
+        if step_min is not None and (r["step"] or 0) < step_min:
+            continue
+        if rep_eq is not None:
+            if r["rep"] != rep_eq:
+                continue
+        elif rep_min is not None and (r["rep"] is None or r["rep"] < rep_min):
+            continue
+        out.append(r)
+    return out
+
+
+def healing_section(data, rep_min=1, rep_eq=None) -> dict:
+    runs = [r for r in _runs(data, condition="self_healing", step_min=1, rep_min=rep_min, rep_eq=rep_eq)
+            if r["breaking"]]
+    alarmed = [r for r in runs if r["detected"]]
+    gt_ok = [r for r in alarmed if r["gt_recovered"]]
+    sys_ok = [r for r in alarmed if r["healed"]]
+    broken_fields = sum(len(r["broken_fields"]) for r in runs)
+    recovered_fields = sum(r.get("fields_recovered", 0) for r in runs)
+    by_cat = defaultdict(lambda: [0, 0])
+    for r in alarmed:
+        by_cat[r["category"]][0] += 1
+        by_cat[r["category"]][1] += 1 if r["gt_recovered"] else 0
+    return {
+        "breaking_events": len(runs),
+        "detected_breaking_events": len(alarmed),
+        "gt_recovered_events": len(gt_ok),
+        "system_reported_healed": len(sys_ok),
+        "success_rate_gt": M.safe_div(len(gt_ok), len(alarmed)),
+        "success_rate_gt_all_breaking": M.safe_div(len(gt_ok), len(runs)),
+        "success_rate_system": M.safe_div(len(sys_ok), len(alarmed)),
+        "broken_fields": broken_fields,
+        "recovered_fields": recovered_fields,
+        "field_recovery_rate": M.safe_div(recovered_fields, broken_fields),
+        "by_category": {c: {"events": n, "gt_recovered": k, "rate": M.safe_div(k, n)}
+                        for c, (n, k) in sorted(by_cat.items())},
+    }
+
+
+def _signals(runs) -> dict:
+    signals = {
+        "alarm (health < threshold)": [bool(r["detected"]) for r in runs],
+        "xpath failure rate > 0": [r["pre_failure_rate"] > 0 for r in runs],
+        "required-field mismatch > 0": [r["pre_field_mismatch"] > 0 for r in runs],
+    }
+    for t in THRESHOLDS:
+        signals[f"structural distance >= {t:.2f}"] = [r["structural"] >= t for r in runs]
+        signals[f"markup distance >= {t:.2f}"] = [r["markup"] >= t for r in runs]
+    return signals
+
+
+def detection_section(data, condition="self_healing", rep_min=1, rep_eq=None) -> list[dict]:
+    """
+    Two evaluations:
+    * failure detection — all monitoring runs (step >= 1); positive = some
+      field actually wrong before healing ("degraded"). Gives the proposal's
+      false-positive failure-detection rate.
+    * change detection (RQ1) — only runs that started from a fully correct
+      state; positive = this step newly broke a field, or (design label) a
+      structural change was applied.
+    """
+    monitored = [r for r in _runs(data, condition=condition, step_min=1, rep_min=rep_min, rep_eq=rep_eq)
+                 if r["degraded"] is not None]
+    clean = [r for r in monitored if r["prev_clean"]]
+    rows = []
+    for scope, runs, labels in (
+        ("all monitoring runs", monitored,
+         {"degraded (field wrong before healing)": [bool(r["degraded"]) for r in monitored]}),
+        ("runs starting healthy", clean,
+         {"breaking change (newly broken)": [bool(r["breaking"]) for r in clean],
+          "structural change (design)": [bool(r["true_change"]) for r in clean]}),
+    ):
+        if not runs:
+            continue
+        signals = _signals(runs)
+        for label_name, label in labels.items():
+            for name, pred in signals.items():
+                ev = M.binary_eval(pred, label)
+                rows.append({"condition": condition, "scope": scope, "label": label_name,
+                             "signal": name, **ev})
+    return rows
+
+
+def rq4_rows(data, rep_min=1) -> list[dict]:
+    calls_by_run = defaultdict(list)
+    for c in data["calls"]:
+        if c["purpose"] == LLMPurpose.HEALING:
+            calls_by_run[c["run_id"]].append(c)
+    rows = []
+    for e in data["events"]:
+        run = data["runs"].get(e["run_id"])
+        if not run or run["condition"] != "self_healing" or e["resolution"] == "not_attempted":
+            continue
+        if run["rep"] is None or run["rep"] < rep_min:
+            continue
+        calls = calls_by_run.get(run["id"], [])
+        rows.append({
+            "site": run["site"], "category": run["category"], "rep": run["rep"], "step": run["step"],
+            "op": run["op"], "severity": run["severity"], "breaking": run["breaking"],
+            "resolution": e["resolution"], "gt_recovered": run["gt_recovered"],
+            "attempts": e["attempts"], "affected_fields": len(e["affected"]),
+            "failure_history_len": max([c["history_len"] for c in calls] or [e["history_len"]]),
+            "structural_distance": e["structural"], "markup_distance": e["markup"],
+            "healing_latency_ms": sum(c["latency_ms"] + c["validation_ms"] for c in calls),
+            "rate_limit_wait_ms": sum(c["wait_ms"] for c in calls),
+            "ttr_excl_wait_ms": e["ttr_excl_ms"] if e["resolution"] == "auto_healed" else None,
+            "ttr_ms": e["ttr_ms"] if e["resolution"] == "auto_healed" else None,
+            "healing_tokens": sum(c["prompt_tokens"] + c["completion_tokens"] for c in calls),
+        })
+    return rows
+
+
+def per_site(data) -> list[dict]:
+    rows = []
+    for site, fields in data["site_fields"].items():
+        row = {"site": site}
+        for cond in ("self_healing", "static"):
+            agg = M.aggregate(_recs(data, condition=cond, sites={site}))
+            row[f"{cond}_sustained_f1"] = agg["f1"]
+        init = M.aggregate(_recs(data, condition="self_healing", step=0, sites={site}))
+        row["initial_f1"] = init["f1"]
+        row["category"] = next((b["category"] for b in data["baselines"] if b["site"] == site), "")
+        rows.append(row)
+    return rows
+
+
+def build(exp) -> dict:
+    data = collect(exp)
+    label_breaking(data)
+    ecfg = exp.config["experiment"]
+    reps = list(range(1, ecfg["repetitions"] + 1))
+
+    initial = M.aggregate(_recs(data, condition="self_healing", step=0))
+    sustained = {c: M.aggregate(_recs(data, condition=c)) for c in ecfg["conditions"]}
+    healing = healing_section(data)
+    detection = detection_section(data) + (
+        detection_section(data, condition="static") if "static" in ecfg["conditions"] else [])
+    alarm_vs_degraded = next((d for d in detection if d["condition"] == "self_healing"
+                              and d["label"].startswith("degraded")
+                              and d["signal"].startswith("alarm")), None)
+    ttr = [e for e in rq4_rows(data) if e["resolution"] == "auto_healed"]
+    regen = [c for c in data["calls"]
+             if c["purpose"] == LLMPurpose.HEALING and not c["fallback"]
+             and data["runs"].get(c["run_id"], {}).get("rep", 0)]
+    ttr_s = M.describe([e["ttr_excl_wait_ms"] / 1000 for e in ttr])
+    ttr_incl_s = M.describe([e["ttr_ms"] / 1000 for e in ttr])
+    regen_s = M.describe([(c["latency_ms"] + c["validation_ms"]) / 1000 for c in regen])
+    regen_wait_s = M.describe([c["wait_ms"] / 1000 for c in regen])
+
+    # F1 by step (F1 over time) per condition
+    steps = sorted({r["step"] for r in data["runs"].values() if r["rep"] and r["rep"] >= 1})
+    by_step = []
+    for s in steps:
+        row = {"step": s}
+        for c in ecfg["conditions"]:
+            row[f"{c}_f1"] = M.aggregate(_recs(data, condition=c, step=s))["f1"]
+        ops = sorted({r["op"] for r in data["runs"].values() if r["step"] == s and r["rep"]})
+        row["operators"] = ", ".join(o for o in ops if o)
+        by_step.append(row)
+
+    sites = per_site(data)
+    paired = None
+    if "static" in ecfg["conditions"]:
+        diffs = [r["self_healing_sustained_f1"] - r["static_sustained_f1"] for r in sites
+                 if r["self_healing_sustained_f1"] is not None and r["static_sustained_f1"] is not None]
+        wins = sum(1 for d in diffs if d > 0)
+        losses = sum(1 for d in diffs if d < 0)
+        paired = {"sites": len(diffs), "mean_diff": M.describe(diffs)["mean"],
+                  "wins": wins, "losses": losses, "ties": len(diffs) - wins - losses,
+                  "sign_test_p": M.sign_test(wins, losses), "wilcoxon_p": M.wilcoxon(diffs)}
+
+    per_rep = []
+    for rep in reps:
+        row = {"rep": rep,
+               "initial_f1": M.aggregate(_recs(data, condition="self_healing", step=0, rep_eq=rep))["f1"]}
+        for c in ecfg["conditions"]:
+            row[f"{c}_sustained_f1"] = M.aggregate(_recs(data, condition=c, rep_eq=rep))["f1"]
+        row["healing_success_rate_gt"] = healing_section(data, rep_eq=rep)["success_rate_gt"]
+        per_rep.append(row)
+    rep_summary = {k: M.describe([r[k] for r in per_rep]) for k in (per_rep[0] if per_rep else {}) if k != "rep"}
+
+    reductions = [b["reduction"] for b in data["baselines"] if b["reduction"] is not None]
+    presence_total = presence_view = 0
+    for b in data["baselines"]:
+        for p in (b["presence"] or {}).values():
+            if p.get("labelled_absent"):
+                continue
+            presence_total += 1
+            presence_view += 1 if p.get("in_llm_view") else 0
+    tokens = {
+        "tokenizers": sorted({b["tokenizer"] for b in data["baselines"] if b["tokenizer"]}),
+        "raw_tokens": M.describe([b["raw_tokens"] for b in data["baselines"]]),
+        "llm_view_tokens": M.describe([b["llm_view_tokens"] for b in data["baselines"]]),
+        "reduction": M.describe(reductions),
+        "sites_at_or_above_90pct": sum(1 for r in reductions if r >= 0.9),
+        "sites": len(reductions),
+        "field_preservation_in_llm_view": M.safe_div(presence_view, presence_total),
+        "views_truncated": sum(1 for b in data["baselines"] if b["view_truncated"]),
+    }
+
+    init_tokens = [r["prompt_tokens"] + r["completion_tokens"] for r in
+                   _runs(data, condition="self_healing") if r["step"] == 0]
+    heal_tokens = [e["healing_tokens"] for e in rq4_rows(data)]
+    priced = [c["cost"] for c in data["calls"] if c["cost"] is not None]
+    cost = {
+        "tokens_per_initial_generation": M.describe(init_tokens),
+        "tokens_per_healing_event": M.describe(heal_tokens),
+        "total_prompt_tokens": sum(c["prompt_tokens"] for c in data["calls"]),
+        "total_completion_tokens": sum(c["completion_tokens"] for c in data["calls"]),
+        "usd_total": sum(priced) if priced else None,
+        "usd_priced_calls": len(priced),
+    }
+
+    by_purpose = defaultdict(int)
+    for c in data["calls"]:
+        by_purpose[c["purpose"]] += 1
+    reliability = {
+        "llm_calls": len(data["calls"]),
+        "calls_by_purpose": dict(by_purpose),
+        "errors": sum(1 for c in data["calls"] if not c["success"]),
+        "fallback_calls": sum(1 for c in data["calls"] if c["fallback"]),
+        "retries": sum(c["retries"] for c in data["calls"]),
+        "rate_limit_wait_s": sum(c["wait_ms"] for c in data["calls"]) / 1000,
+        "truncated_inputs": sum(1 for c in data["calls"] if c["truncated"]),
+        "models": sorted({c["model"] for c in data["calls"] if c["model"]}),
+        "providers": sorted({c["provider"] for c in data["calls"]}),
+    }
+
+    rq4 = rq4_rows(data)
+    rq4_corr = {
+        var: M.spearman([e[var] for e in rq4], [e["healing_latency_ms"] for e in rq4])
+        for var in ("structural_distance", "markup_distance", "affected_fields",
+                    "failure_history_len", "attempts")
+    }
+
+    baselines_cmp = []
+    conds = sorted({r["condition"] for r in data["runs"].values() if r["condition"].startswith("baseline:")})
+    for cond in conds:
+        snaps = {r["snapshot_id"] for r in data["runs"].values() if r["condition"] == cond}
+        theirs = [r for r in data["records"] if r["condition"] == cond and r["phase"] == RecordPhase.FINAL]
+        row = {"system": cond.split(":", 1)[1], "snapshots": len(snaps), **_f(M.aggregate(theirs))}
+        baselines_cmp.append(row)
+        for own in ecfg["conditions"]:
+            mine = [r for r in data["records"] if r["condition"] == own and r["phase"] == RecordPhase.FINAL
+                    and data["runs"][r["run_id"]]["snapshot_id"] in snaps]
+            baselines_cmp.append({"system": f"{own} (same snapshots)", "snapshots": len(snaps),
+                                  **_f(M.aggregate(mine))})
+
+    natural = None
+    if any(r["rep"] == 0 for r in data["runs"].values()):
+        natural = {
+            "sustained_f1": {c: M.aggregate(_recs(data, condition=c, rep_eq=0))["f1"]
+                             for c in ecfg["conditions"]},
+            "healing": healing_section(data, rep_min=None, rep_eq=0),
+            "detection": detection_section(data, rep_min=None, rep_eq=0),
+            "human_layout_changed": sum(1 for r in data["runs"].values()
+                                        if r["rep"] == 0 and r["condition"] == "self_healing"
+                                        and r["true_change"]),
+        }
+
+    rq5_sites = [s for s in sites if s["self_healing_sustained_f1"] is not None]
+    table51 = [
+        _target_row("Initial extraction accuracy (F1)", initial["f1"], TARGETS["initial_f1"], ">="),
+        _target_row("Self-healing success rate (GT-verified)", healing["success_rate_gt"],
+                    TARGETS["healing_success_rate"], ">="),
+        _target_row("Time-to-recovery, median s (excl. rate-limit waits)", ttr_s["median"],
+                    TARGETS["time_to_recovery_s"], "<="),
+        _target_row("XPath regeneration latency, median s", regen_s["median"],
+                    TARGETS["regeneration_latency_s"], "<="),
+        _target_row("Sustained F1 (self-healing, all steps)",
+                    sustained.get("self_healing", {}).get("f1"), TARGETS["sustained_f1"], ">="),
+        _target_row("False-positive failure detections (false alarms / monitoring events)",
+                    alarm_vs_degraded["false_alarm_share"] if alarm_vs_degraded else None,
+                    TARGETS["false_positive_rate"], "<="),
+    ]
+    silent = alarm_vs_degraded["fn"] if alarm_vs_degraded else None
+
+    return {
+        "experiment": exp.name,
+        "config": exp.config["experiment"],
+        "environment": exp.environment,
+        "counts": {
+            "sites": len(exp.config["sites"]),
+            "repetitions": ecfg["repetitions"],
+            "runs": len(data["runs"]),
+            "records": len(data["records"]),
+            "change_events": len(data["events"]),
+        },
+        "table_5_1": table51,
+        "initial": _f(initial),
+        "sustained": {c: _f(v) for c, v in sustained.items()},
+        "healing": healing,
+        # degraded runs with no alarm: wrong-but-non-empty values the health
+        # monitor cannot see (reported, never hidden).
+        "silent_failures": silent,
+        "time_to_recovery_s": ttr_s,
+        "time_to_recovery_incl_wait_s": ttr_incl_s,
+        "regeneration_latency_s": regen_s,
+        "regeneration_rate_limit_wait_s": regen_wait_s,
+        "detection": detection,
+        "f1_by_step": by_step,
+        "per_site": sites,
+        "rq5": {"sites": len(rq5_sites),
+                "sites_sustained_f1_ge_0_80": sum(1 for s in rq5_sites if s["self_healing_sustained_f1"] >= 0.8)},
+        "paired_comparison": paired,
+        "per_repetition": per_rep,
+        "repetition_summary": rep_summary,
+        "tokens": tokens,
+        "cost": cost,
+        "reliability": reliability,
+        "rq4_correlations_spearman": rq4_corr,
+        "rq4_events": rq4,
+        "baselines": baselines_cmp,
+        "natural": natural,
+        "_data": data,
+    }
+
+
+def _f(agg: dict) -> dict:
+    return {k: agg.get(k) for k in ("precision", "recall", "f1", "tp", "fp", "fn",
+                                    "fields", "field_accuracy", "token_f1_mean")}
+
+
+def _target_row(name, value, target, op):
+    met = None
+    if value is not None:
+        met = value >= target if op == ">=" else value <= target
+    unit = "s" if "median s" in name else "ratio"
+    return {"metric": name, "value": value, "target": f"{op} {target}", "met": met, "unit": unit}
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+def _pct(v):
+    return "n/a" if v is None else f"{v * 100:.1f}%"
+
+
+def _num(v, digits=2):
+    return "n/a" if v is None else f"{v:.{digits}f}"
+
+
+def _write_csv(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keys: list[str] = []
+    for row in rows:
+        for k in row:
+            if k not in keys:
+                keys.append(k)
+    with open(path, "w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=keys or ["empty"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
+                             for k, v in row.items()})
+
+
+def write(exp, out_dir: Path) -> dict:
+    out_dir = Path(out_dir)
+    tables = out_dir / "tables"
+    tables.mkdir(parents=True, exist_ok=True)
+    rep = build(exp)
+    data = rep.pop("_data")
+
+    with open(out_dir / "summary.json", "w", encoding="utf-8") as fh:
+        json.dump(rep, fh, indent=2, ensure_ascii=False, default=str)
+
+    _write_csv(tables / "table_5_1.csv", rep["table_5_1"])
+    _write_csv(tables / "f1_by_step.csv", rep["f1_by_step"])
+    _write_csv(tables / "per_site.csv", rep["per_site"])
+    _write_csv(tables / "per_repetition.csv", rep["per_repetition"])
+    _write_csv(tables / "detection_rq1.csv", rep["detection"])
+    _write_csv(tables / "healing_events_rq4.csv", rep["rq4_events"])
+    _write_csv(tables / "healing_by_category_rq2.csv",
+               [{"category": c, **v} for c, v in rep["healing"]["by_category"].items()])
+    _write_csv(tables / "token_reduction.csv", data["baselines"])
+    _write_csv(tables / "baselines_o4.csv", rep["baselines"])
+    _write_csv(tables / "runs_labelled.csv", list(data["runs"].values()))
+
+    (out_dir / "report.md").write_text(render_markdown(rep), encoding="utf-8")
+    return rep
+
+
+def render_markdown(rep: dict) -> str:
+    L = []
+    c = rep["counts"]
+    cfg = rep["config"]
+    env = rep["environment"]
+    L.append(f"# Evaluation report — {rep['experiment']}\n")
+    L.append(f"{c['sites']} sites x {c['repetitions']} repetitions; {c['runs']} runs, "
+             f"{c['records']} field records, {c['change_events']} change events.  ")
+    L.append(f"LLM: {cfg['llm']['provider']} / {cfg['llm'].get('model') or 'default model'}; "
+             f"threshold {cfg['health_threshold']}, max attempts {cfg['max_heal_attempts']}, "
+             f"memory {cfg['failure_memory_size']}, seed {cfg['seed']}.  ")
+    L.append(f"Environment: Python {env.get('python')}, {env.get('platform')}, git "
+             f"{(env.get('git_commit') or 'n/a')[:10]}{' (dirty)' if env.get('git_dirty') else ''}, "
+             f"tokenizer {env.get('tokenizer')}, prompt {env.get('prompt_version')}.\n")
+
+    L.append("## Table 5.1 — target metrics\n")
+    L.append("| Metric | Value | Target | Met |\n|---|---|---|---|")
+    for row in rep["table_5_1"]:
+        v = row["value"]
+        shown = _num(v) if row["unit"] == "s" else _pct(v)
+        met = "n/a" if row["met"] is None else ("yes" if row["met"] else "no")
+        L.append(f"| {row['metric']} | {shown} | {row['target']} | {met} |")
+
+    i = rep["initial"]
+    L.append("\n## Extraction accuracy\n")
+    L.append(f"Initial (t0): P {_pct(i['precision'])}, R {_pct(i['recall'])}, F1 {_pct(i['f1'])} "
+             f"over {i['fields']} field decisions; token-F1 {_pct(i['token_f1_mean'])}.  ")
+    for cond, s in rep["sustained"].items():
+        L.append(f"Sustained, {cond}: P {_pct(s['precision'])}, R {_pct(s['recall'])}, "
+                 f"F1 {_pct(s['f1'])} ({s['fields']} decisions).  ")
+    L.append("\n| Step | " + " | ".join(f"{k}" for k in rep["f1_by_step"][0] if k != "step")
+             + " |" if rep["f1_by_step"] else "")
+    if rep["f1_by_step"]:
+        keys = [k for k in rep["f1_by_step"][0] if k != "step"]
+        L.append("|---|" + "---|" * len(keys))
+        for row in rep["f1_by_step"]:
+            L.append(f"| {row['step']} | " + " | ".join(
+                row[k] if k == "operators" else _pct(row[k]) for k in keys) + " |")
+
+    h = rep["healing"]
+    L.append("\n## Self-healing (RQ2)\n")
+    L.append(f"Breaking change events: {h['breaking_events']} ({h['detected_breaking_events']} detected).  ")
+    L.append(f"GT-verified success: {_pct(h['success_rate_gt'])} of detected; "
+             f"{_pct(h['success_rate_gt_all_breaking'])} of all breaking.  ")
+    L.append(f"System-reported success: {_pct(h['success_rate_system'])}.  ")
+    L.append(f"Field-level recovery: {h['recovered_fields']}/{h['broken_fields']} "
+             f"({_pct(h['field_recovery_rate'])}).\n")
+    if h["by_category"]:
+        L.append("| Category | Events | GT-recovered | Rate |\n|---|---|---|---|")
+        for cat, v in h["by_category"].items():
+            L.append(f"| {cat} | {v['events']} | {v['gt_recovered']} | {_pct(v['rate'])} |")
+
+    t, ti, g = rep["time_to_recovery_s"], rep["time_to_recovery_incl_wait_s"], rep["regeneration_latency_s"]
+    L.append("\n## Latency (RQ4)\n")
+    L.append(f"Time-to-recovery (excl. rate-limit waits): median {_num(t['median'])} s, "
+             f"p95 {_num(t['p95'])} s, n={t['n']}. Including waits: median {_num(ti['median'])} s.  ")
+    L.append(f"Regeneration latency per healing call: median {_num(g['median'])} s, "
+             f"p95 {_num(g['p95'])} s, n={g['n']}.  ")
+    L.append("Spearman correlation of healing latency with: " + ", ".join(
+        f"{k} {_num(v)}" for k, v in rep["rq4_correlations_spearman"].items()) + ".\n")
+
+    L.append("## Failure and change detection (RQ1)\n")
+    L.append(f"Silent failures (a field wrong before healing but no alarm): {rep['silent_failures']}.\n")
+    L.append("| Condition | Scope | Label | Signal | n | Precision | Recall | F1 | FPR | False alarms / events |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|")
+    for d in rep["detection"]:
+        L.append(f"| {d['condition']} | {d['scope']} | {d['label']} | {d['signal']} | {d['n']} | "
+                 f"{_pct(d['precision'])} | {_pct(d['recall'])} | {_pct(d['f1'])} | {_pct(d['fpr'])} | "
+                 f"{_pct(d['false_alarm_share'])} |")
+
+    p = rep["paired_comparison"]
+    L.append("\n## Self-healing vs. static (RQ3)\n")
+    if p:
+        L.append(f"Per-site sustained F1 difference: mean {_pct(p['mean_diff'])}; "
+                 f"wins/ties/losses {p['wins']}/{p['ties']}/{p['losses']}; "
+                 f"sign test p={_num(p['sign_test_p'], 4)}; Wilcoxon p={_num(p['wilcoxon_p'], 4)}.\n")
+    L.append("| Site | Category | Initial F1 | Sustained F1 (self-healing) | Sustained F1 (static) |")
+    L.append("|---|---|---|---|---|")
+    for s in rep["per_site"]:
+        L.append(f"| {s['site']} | {s['category']} | {_pct(s['initial_f1'])} | "
+                 f"{_pct(s['self_healing_sustained_f1'])} | {_pct(s.get('static_sustained_f1'))} |")
+    r5 = rep["rq5"]
+    L.append(f"\nRQ5: {r5['sites_sustained_f1_ge_0_80']} of {r5['sites']} sites keep sustained F1 >= 80%.\n")
+
+    L.append("## Repetitions\n")
+    for k, v in rep["repetition_summary"].items():
+        L.append(f"- {k}: mean {_pct(v['mean'])} +/- {_pct(v['std'])} (n={v['n']})")
+
+    tk = rep["tokens"]
+    L.append("\n## Pruning and tokens\n")
+    L.append(f"Tokenizer(s): {', '.join(tk['tokenizers']) or 'n/a'}.  ")
+    L.append(f"Raw page tokens median {_num(tk['raw_tokens']['median'], 0)}; LLM view median "
+             f"{_num(tk['llm_view_tokens']['median'], 0)}; reduction mean {_pct(tk['reduction']['mean'])}, "
+             f"median {_pct(tk['reduction']['median'])}, min {_pct(tk['reduction']['min'])}.  ")
+    L.append(f"Sites with >= 90% reduction: {tk['sites_at_or_above_90pct']}/{tk['sites']}. "
+             f"Labelled values visible in the LLM view: {_pct(tk['field_preservation_in_llm_view'])}. "
+             f"Truncated views: {tk['views_truncated']}.\n")
+
+    co, rl = rep["cost"], rep["reliability"]
+    L.append("## Cost and reliability\n")
+    L.append(f"Tokens per initial generation: median {_num(co['tokens_per_initial_generation']['median'], 0)}; "
+             f"per healing event: median {_num(co['tokens_per_healing_event']['median'], 0)}. "
+             f"Total {co['total_prompt_tokens']} prompt + {co['total_completion_tokens']} completion tokens"
+             + (f"; USD {co['usd_total']:.4f}" if co["usd_total"] is not None else "; USD not priced") + ".  ")
+    L.append(f"LLM calls {rl['llm_calls']} {rl['calls_by_purpose']}; errors {rl['errors']}; "
+             f"fallback calls {rl['fallback_calls']}; retries {rl['retries']}; rate-limit wait "
+             f"{_num(rl['rate_limit_wait_s'], 0)} s; truncated inputs {rl['truncated_inputs']}; "
+             f"models {', '.join(rl['models']) or 'n/a'}.\n")
+
+    if rep["baselines"]:
+        L.append("## External baselines (O4)\n")
+        L.append("| System | Snapshots | Precision | Recall | F1 |\n|---|---|---|---|---|")
+        for b in rep["baselines"]:
+            L.append(f"| {b['system']} | {b['snapshots']} | {_pct(b['precision'])} | "
+                     f"{_pct(b['recall'])} | {_pct(b['f1'])} |")
+
+    if rep["natural"]:
+        n = rep["natural"]
+        L.append("\n## Natural changes\n")
+        L.append(f"Sustained F1: {', '.join(f'{k} {_pct(v)}' for k, v in n['sustained_f1'].items())}.  ")
+        L.append(f"Breaking events {n['healing']['breaking_events']}, GT-verified healing "
+                 f"{_pct(n['healing']['success_rate_gt'])}; human-labelled layout changes "
+                 f"{n['human_layout_changed']}.\n")
+
+    L.append("\n## Definitions\n")
+    L.append("- Field decision: one field in one run. TP = extracted and equal to the label after "
+             "normalisation; a wrong value counts as FP and FN; a missing value as FN; any value for "
+             "a field labelled absent as FP. List fields use item-level multiset matching.")
+    L.append("- Degraded run: at least one field is wrong before healing (whenever it broke). "
+             "Ground truth for failure alarms.")
+    L.append("- Breaking change: a field correct at the previous step is wrong at this step before "
+             "healing (per condition). Change detection (RQ1) is scored only on runs that started "
+             "with every field correct, so persistent earlier failures cannot inflate it.")
+    L.append("- Alarm: pre-heal health below the threshold. False alarm: alarm on a run that is not "
+             "degraded. False-positive rate (Table 5.1) = false alarms / all monitoring runs (step >= 1).")
+    L.append("- Silent failure: degraded run without an alarm (e.g. a wrong but non-empty value).")
+    L.append("- GT-verified healing success: every field broken at a step is correct after healing.")
+    L.append("- Latencies exclude time spent waiting on provider rate limits (reported separately).")
+    return "\n".join(L) + "\n"

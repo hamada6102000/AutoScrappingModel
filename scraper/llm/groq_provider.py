@@ -1,24 +1,46 @@
 """
 Groq provider (free, fast LLaMA inference — proposal LLaMA class).
 
-Groq's Cloud API is OpenAI-compatible, so this talks to it with plain ``requests``
-(no extra SDK needed). Get a free API key at https://console.groq.com/keys and
-set GROQ_API_KEY. Free-tier models include:
+Groq's Cloud API is OpenAI-compatible, so this talks to it with plain
+``requests`` (no extra SDK). Get a free key at https://console.groq.com/keys.
 
-    * llama-3.3-70b-versatile   (default; strongest reasoning)
-    * llama-3.1-8b-instant      (fastest / lightest on rate limits)
-
-The free tier is rate-limited but has no cost.
+Rate limits: on HTTP 429 the provider waits for ``retry-after`` (or the delay
+quoted in the error message) and retries, up to SCRAPER["LLM_MAX_RETRIES"]
+times and SCRAPER["LLM_MAX_WAIT_SECONDS"] of total waiting. Waiting time is
+reported separately (``rate_limit_wait_ms``) and excluded from latency. If the
+limit is still hit, ``RateLimitExhausted`` is raised so the evaluation harness
+can stop cleanly and resume later instead of recording a bogus failure.
 """
 
 from __future__ import annotations
 
+import re
+import time
 from typing import Optional
 
 import requests
 
-from .base import FailureHint, FieldSpec, LLMProvider, LLMResult
-from .prompts import SYSTEM_PROMPT, build_user_prompt, parse_xpath_json
+from .base import (
+    FailureHint, FieldSpec, LLMError, LLMProvider, LLMResult,
+    RateLimitExhausted, RequestTooLarge,
+)
+from .prompts import SYSTEM_PROMPT, build_prompt, parse_xpath_json
+
+_WAIT_IN_MSG = re.compile(r"try again in\s+(?:(\d+)m)?\s*([\d.]+)s", re.I)
+
+
+def _parse_wait_seconds(resp) -> Optional[float]:
+    headers = getattr(resp, "headers", {}) or {}
+    value = headers.get("retry-after") or headers.get("Retry-After")
+    if value:
+        try:
+            return float(value)
+        except ValueError:
+            pass
+    m = _WAIT_IN_MSG.search(getattr(resp, "text", "") or "")
+    if m:
+        return int(m.group(1) or 0) * 60 + float(m.group(2))
+    return None
 
 
 class GroqProvider(LLMProvider):
@@ -30,6 +52,10 @@ class GroqProvider(LLMProvider):
         model: str = "llama-3.3-70b-versatile",
         host: str = "https://api.groq.com/openai/v1",
         timeout: int = 120,
+        max_retries: int = 6,
+        max_wait_seconds: int = 900,
+        max_input_chars: int = 60000,
+        sleep=time.sleep,
     ):
         if not api_key:
             raise ValueError(
@@ -41,6 +67,10 @@ class GroqProvider(LLMProvider):
         self.model = model
         self.base = host.rstrip("/")
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.max_wait_seconds = max_wait_seconds
+        self.max_input_chars = max_input_chars
+        self._sleep = sleep
 
     def generate_xpaths(
         self,
@@ -48,25 +78,30 @@ class GroqProvider(LLMProvider):
         fields: list[FieldSpec],
         failure_history: Optional[list[FailureHint]] = None,
     ) -> LLMResult:
-        prompt = build_user_prompt(pruned_html, fields, failure_history)
+        prompt, meta = build_prompt(pruned_html, fields, failure_history, self.max_input_chars)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
-        data = self._chat(messages)
+        data, call = self._chat(messages)
         text = data["choices"][0]["message"]["content"] or ""
-        xpaths = parse_xpath_json(text, fields)
         usage = data.get("usage", {}) or {}
         return LLMResult(
-            xpaths=xpaths,
-            model=self.model,
+            xpaths=parse_xpath_json(text, fields),
+            model=data.get("model") or self.model,
             prompt_tokens=usage.get("prompt_tokens", 0) or 0,
             completion_tokens=usage.get("completion_tokens", 0) or 0,
             raw_response=text,
+            latency_ms=call["latency_ms"],
+            rate_limit_wait_ms=call["wait_ms"],
+            retries=call["retries"],
+            input_chars=meta["input_chars"],
+            input_truncated=meta["input_truncated"],
+            prompt_sha=meta["prompt_sha"],
         )
 
     # ------------------------------------------------------------------
-    def _chat(self, messages: list[dict]) -> dict:
+    def _chat(self, messages: list[dict]) -> tuple[dict, dict]:
         url = f"{self.base}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         payload = {
@@ -74,13 +109,56 @@ class GroqProvider(LLMProvider):
             "messages": messages,
             "temperature": 0,
             "max_tokens": 1500,
-            # Ask for a JSON object; the prompt already requires JSON output.
             "response_format": {"type": "json_object"},
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
-        # Some models reject response_format — retry once without JSON mode.
-        if resp.status_code == 400 and "response_format" in resp.text:
-            payload.pop("response_format", None)
-            resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
+        waited = 0.0
+        retries = 0
+        attempt = 0
+        while True:
+            attempt += 1
+            start = time.perf_counter()
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+            except requests.RequestException as exc:
+                if retries >= self.max_retries:
+                    raise LLMError(f"network error: {exc}") from exc
+                delay = min(2 ** retries, 30)
+                self._sleep(delay)
+                waited += delay
+                retries += 1
+                continue
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            status = resp.status_code
+
+            if status == 429:
+                delay = _parse_wait_seconds(resp) or min(2 ** (retries + 1), 60)
+                if retries >= self.max_retries or waited + delay > self.max_wait_seconds:
+                    raise RateLimitExhausted(
+                        f"Groq rate limit still exceeded after {retries} retries / "
+                        f"{int(waited)}s waiting: {resp.text[:200]}"
+                    )
+                self._sleep(delay)
+                waited += delay
+                retries += 1
+                continue
+            if status == 413:
+                raise RequestTooLarge(f"prompt too large for {self.model}: {resp.text[:200]}")
+            if status == 400 and "response_format" in resp.text and "response_format" in payload:
+                payload.pop("response_format")  # model without JSON mode
+                retries += 1
+                continue
+            if status >= 500:
+                if retries >= self.max_retries:
+                    raise LLMError(f"HTTP {status}: {resp.text[:200]}")
+                delay = min(2 ** retries, 30)
+                self._sleep(delay)
+                waited += delay
+                retries += 1
+                continue
+            if status >= 400:
+                raise LLMError(f"HTTP {status}: {resp.text[:200]}")
+            return resp.json(), {
+                "latency_ms": latency_ms,
+                "wait_ms": int(waited * 1000),
+                "retries": retries,
+            }

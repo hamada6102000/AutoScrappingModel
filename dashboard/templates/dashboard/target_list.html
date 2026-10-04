@@ -72,4 +72,28 @@
       </tbody>
     </table>
   </div>
+
+  {% if experiments %}
+    <h2>Evaluation experiments</h2>
+    <div class="panel">
+      <table>
+        <thead><tr><th>Experiment</th><th>Targets</th><th>Snapshots</th><th>Runs</th><th>Created</th></tr></thead>
+        <tbody>
+          {% for e in experiments %}
+            <tr>
+              <td><strong>{{ e.name }}</strong></td>
+              <td>{{ e.n_targets }}</td>
+              <td>{{ e.n_snapshots }}</td>
+              <td>{{ e.n_runs }}</td>
+              <td class="muted">{{ e.created_at|date:"M j, Y H:i" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="muted" style="font-size:12px;margin-top:8px">
+        Metrics come from <code>python manage.py eval_report --experiment NAME</code>.
+        {% if show_eval %}<a href="?">Hide evaluation targets</a>{% else %}<a href="?eval=1">Show evaluation targets in the list above</a>{% endif %}
+      </div>
+    </div>
+  {% endif %}
 {% endblock %}

@@ -10,6 +10,35 @@ class TargetFieldInline(admin.TabularInline):
     extra = 1
 
 
+@admin.register(models.Experiment)
+class ExperimentAdmin(admin.ModelAdmin):
+    list_display = ("name", "created_at")
+    search_fields = ("name",)
+
+
+class GroundTruthInline(admin.TabularInline):
+    model = models.GroundTruth
+    extra = 0
+
+
+@admin.register(models.Snapshot)
+class SnapshotAdmin(admin.ModelAdmin):
+    list_display = (
+        "id", "experiment", "site_key", "kind", "repetition", "step",
+        "raw_tokens", "llm_view_tokens", "fetched_at",
+    )
+    list_filter = ("experiment", "kind")
+    search_fields = ("site_key", "url")
+    inlines = [GroundTruthInline]
+
+
+@admin.register(models.GroundTruth)
+class GroundTruthAdmin(admin.ModelAdmin):
+    list_display = ("snapshot", "field_name", "value", "source", "verified_by")
+    list_filter = ("source",)
+    search_fields = ("field_name", "value")
+
+
 @admin.register(models.ScrapeTarget)
 class ScrapeTargetAdmin(admin.ModelAdmin):
     list_display = ("name", "category", "url", "is_active", "created_at")

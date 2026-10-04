@@ -29,10 +29,10 @@ replaces this class behind the same interface with far stronger generalisation.
 from __future__ import annotations
 
 import re
+import time
 from typing import Optional
 
-from lxml import html as lxml_html
-
+from ..services.htmlutil import parse_html
 from .base import FailureHint, FieldSpec, LLMResult, LLMProvider
 
 
@@ -126,6 +126,7 @@ def _xpath_escape(value: str) -> str:
 
 class HeuristicProvider(LLMProvider):
     name = "heuristic"
+    model = "heuristic-v1"
 
     def generate_xpaths(
         self,
@@ -133,10 +134,10 @@ class HeuristicProvider(LLMProvider):
         fields: list[FieldSpec],
         failure_history: Optional[list[FailureHint]] = None,
     ) -> LLMResult:
-        try:
-            tree = lxml_html.fromstring(pruned_html)
-        except Exception:
-            return LLMResult(xpaths={}, model="heuristic-v1")
+        start = time.perf_counter()
+        tree = parse_html(pruned_html)
+        if tree is None:
+            return LLMResult(xpaths={}, model=self.model)
 
         elements = list(tree.iter())
         # XPaths already known to be broken (from failure memory) are avoided.
@@ -148,14 +149,13 @@ class HeuristicProvider(LLMProvider):
             if xpath:
                 result[spec.name] = xpath
 
-        # Rough token estimate so the LLMCallLog reflects "work done".
-        approx = max(1, len(pruned_html) // 4)
+        # Not an LLM: no tokens are consumed, so none are reported.
         return LLMResult(
             xpaths=result,
-            model="heuristic-v1",
-            prompt_tokens=approx,
-            completion_tokens=len(result) * 12,
+            model=self.model,
             raw_response=repr(result),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+            input_chars=len(pruned_html),
         )
 
     # ------------------------------------------------------------------
