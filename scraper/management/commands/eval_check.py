@@ -7,14 +7,17 @@ Step 5 — check everything is ready before spending LLM quota.
 
 from __future__ import annotations
 
+import json
 import time
 
 from django.core.management.base import BaseCommand
+from django.utils import timezone
 
 from scraper.evaluation.cli import add_experiment_arg, get_experiment, pct
 from scraper.evaluation.protocol import baseline_snapshot, estimate, gt_status
 from scraper.llm.base import FieldSpec
 from scraper.llm.factory import get_provider
+from scraper.services import snapshots as snapstore
 from scraper.services import tokens
 
 
@@ -79,9 +82,15 @@ class Command(BaseCommand):
         if opts["ping"] and provider is not None:
             html = "<html><body><main><h1 class='title'>Ping</h1></main></body></html>"
             start = time.perf_counter()
+            record = {"at": timezone.now().isoformat(), "provider": e["llm"]["provider"],
+                      "model": e["llm"].get("model"), "ok": False}
+            ping_file = snapstore.experiment_dir(exp) / "llm_ping.json"
             try:
                 res = provider.generate_xpaths(html, [FieldSpec("title", "the page title")])
                 ms = int((time.perf_counter() - start) * 1000)
+                record.update({"ok": bool(res.xpaths.get("title")), "latency_ms": ms,
+                               "model_reported": res.model,
+                               "limits": getattr(provider, "last_rate_limits", {}) or {}})
                 if res.xpaths.get("title"):
                     self.stdout.write(self.style.SUCCESS(
                         f"\nLLM ping OK: {res.model}, {ms} ms, {res.prompt_tokens}+{res.completion_tokens} "
@@ -97,6 +106,8 @@ class Command(BaseCommand):
                     problems.append(f"LLM ping returned no XPath (raw: {res.raw_response[:120]!r})")
             except Exception as exc:
                 problems.append(f"LLM ping failed: {type(exc).__name__}: {exc}")
+                record["error"] = f"{type(exc).__name__}: {exc}"[:500]
+            ping_file.write_text(json.dumps(record, indent=2), encoding="utf-8")
 
         for n in notes:
             self.stdout.write(self.style.WARNING(f"  NOTE {n}"))

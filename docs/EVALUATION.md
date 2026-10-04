@@ -23,6 +23,11 @@ python manage.py eval_snapshot
 python manage.py eval_audit
 ```
 
+`eval\prepare.bat` does the whole preparation in one go (virtual environment,
+packages, headless browser, migrate, tests, eval_init, eval_snapshot,
+eval_audit, eval_check --ping) and logs everything to
+`eval_data\prepare_log.txt`. It makes no evaluation runs.
+
 - `eval_import_dataset` maps types (text->string, other->mixed; number, price,
   date, url and boolean unchanged), Single/List -> single/many and
   Yes/No -> required. The recorded value, source, dynamic flag and original
