@@ -255,3 +255,20 @@ class SyncLimitsTests(TempDataDirMixin, TestCase):
         self.assertEqual(exp.config["experiment"]["llm"]["tokens_per_minute"], 250000)
         self.assertIs(exp.config["experiment"]["llm"]["completion_counts_in_tpm"], False)
         self.assertTrue(cfg_path.read_text(encoding="utf-8").startswith("# head"))
+
+
+class CommonChainTests(TempDataDirMixin, TestCase):
+    def test_modules_are_compared_on_chains_all_completed(self):
+        exp = ModuleConditionTests.prepare(self, ["self_healing", "static", "rule_based", "rule_static"])
+        EvaluationRunner(exp, write=lambda m: None, sites=["shop-product", "news-article"],
+                         conditions=["rule_based", "rule_static"]).run()
+        # the "LLM" modules get only repetition 1 of one site (budget stop)
+        EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"], provider=HeuristicProvider(),
+                         conditions=["self_healing", "static"], max_llm_calls=10_000).run_site_rep(
+            __import__("scraper.evaluation.config", fromlist=["site_by_key"]).site_by_key(exp.config, "shop-product"), 1)
+        from scraper.evaluation import report
+        from scraper.evaluation.verify import verify
+        rep = report.build(exp)
+        self.assertEqual(rep["comparison_chains"], [("shop-product", 1)])
+        res = verify(exp)
+        self.assertTrue(res["ok"], res["checks"])

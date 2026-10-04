@@ -75,7 +75,14 @@ def verify(exp, results_dir: Path | None = None) -> dict:
     gts = _gt_index(exp)
     recs = (ExtractedRecord.objects.filter(run__experiment=exp, run__completed=True,
                                            phase=RecordPhase.FINAL, run__repetition__gte=1)
-            .select_related("field", "run"))
+            .select_related("field", "run", "run__target"))
+    rep = report_mod.build(exp)
+    rep.pop("_data", None)
+    chains = rep.get("comparison_chains")
+    chains = None if chains is None else {(c[0], c[1]) for c in chains}
+
+    def compared(run) -> bool:
+        return chains is None or (run.target.site_key, run.repetition) in chains
 
     # 1 + 2: re-score and re-aggregate
     stored_mismatch = 0
@@ -88,8 +95,9 @@ def verify(exp, results_dir: Path | None = None) -> dict:
             continue
         n += 1
         tp, fp, fn, correct = d
-        t = totals[rec.run.condition]
-        t[0] += tp; t[1] += fp; t[2] += fn; t[3] += int(correct); t[4] += 1  # noqa: E702
+        if compared(rec.run):
+            t = totals[rec.run.condition]
+            t[0] += tp; t[1] += fp; t[2] += fn; t[3] += int(correct); t[4] += 1  # noqa: E702
         if rec.field.cardinality == "many":
             if not (gt.notes == "absent") and (rec.list_tp, rec.list_fp, rec.list_fn) != (tp, fp, fn):
                 stored_mismatch += 1
@@ -98,8 +106,6 @@ def verify(exp, results_dir: Path | None = None) -> dict:
     check("stored field scores equal a fresh re-scoring", stored_mismatch == 0,
           f"{n} scored field records, {stored_mismatch} mismatches")
 
-    rep = report_mod.build(exp)
-    rep.pop("_data", None)
     mods = {m["condition"]: m for m in rep.get("modules") or []}
     agg = {}
     for cond in CONDITION_ORDER:
@@ -125,10 +131,13 @@ def verify(exp, results_dir: Path | None = None) -> dict:
     correct = {}   # (run_id, field, phase) -> bool
     runs = {}
     for rec in (ExtractedRecord.objects.filter(run__experiment=exp, run__completed=True,
-                                               run__repetition__gte=1).select_related("field", "run")):
+                                               run__repetition__gte=1)
+                .select_related("field", "run", "run__target")):
         gt = gts.get((rec.run.snapshot_id, rec.field.name))
         d = _decision(rec, gt, thr)
         if d is None:
+            continue
+        if not compared(rec.run):
             continue
         correct[(rec.run_id, rec.field.name, rec.phase)] = d[3]
         runs[rec.run_id] = rec.run

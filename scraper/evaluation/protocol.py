@@ -444,13 +444,16 @@ class EvaluationRunner:
         if problems:
             raise EvalError("not ready:\n  - " + "\n  - ".join(problems))
         try:
-            for key in self.site_keys:
-                site = site_by_key(self.cfg, key)
-                if natural:
-                    self.run_natural(site)
-                else:
-                    for rep in range(1, self.ecfg["repetitions"] + 1):
-                        self.run_site_rep(site, rep)
+            if natural:
+                for key in self.site_keys:
+                    self.run_natural(site_by_key(self.cfg, key))
+            else:
+                # Repetition-major: every site finishes repetition 1 before any
+                # site starts repetition 2, so a run stopped by quota leaves
+                # complete repetitions behind.
+                for rep in range(1, self.ecfg["repetitions"] + 1):
+                    for key in self.site_keys:
+                        self.run_site_rep(site_by_key(self.cfg, key), rep)
         except QuotaStop as exc:
             self.stats["stopped"] = f"LLM quota exhausted: {exc}"
             self.stats["retry_after"] = exc.retry_after

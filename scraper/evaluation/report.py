@@ -354,6 +354,41 @@ def present_conditions(data, ecfg) -> list[str]:
     return [c for c in CONDITION_ORDER if c in ecfg["conditions"] and c in ran]
 
 
+def complete_chains(data, cond, n_steps) -> set:
+    """(site, rep) chains this condition completed from t0 to the last step."""
+    steps = defaultdict(set)
+    for r in data["runs"].values():
+        if r["condition"] == cond and r["rep"]:
+            steps[(r["site"], r["rep"])].add(r["step"])
+    return {k for k, v in steps.items() if set(range(n_steps + 1)) <= v}
+
+
+def common_chains(data, conds, n_steps) -> set | None:
+    """Chains completed by every module, so modules are compared on the same
+    pages; None when no module has a complete chain."""
+    sets = [complete_chains(data, c, n_steps) for c in conds]
+    sets = [s for s in sets if s]
+    if not sets:
+        return None
+    out = sets[0]
+    for s in sets[1:]:
+        out &= s
+    return out
+
+
+def restrict(data, chains) -> dict:
+    """A view of the data limited to the given (site, rep) chains."""
+    if chains is None:
+        return data
+    keep = {rid for rid, r in data["runs"].items() if (r["site"], r["rep"]) in chains}
+    out = dict(data)
+    out["runs"] = {rid: r for rid, r in data["runs"].items() if rid in keep}
+    out["records"] = [r for r in data["records"] if r["run_id"] in keep]
+    out["events"] = [e for e in data["events"] if e["run_id"] in keep]
+    out["calls"] = [c for c in data["calls"] if c["run_id"] in keep]
+    return out
+
+
 def module_rows(data, conds) -> list[dict]:
     """One row per module: accuracy, P/R/F1 at t0 and under change, failure
     detection, healing success, time-to-recovery and latency."""
@@ -433,6 +468,8 @@ def build(exp) -> dict:
     reps = list(range(1, ecfg["repetitions"] + 1))
 
     module_conds = present_conditions(data, ecfg)
+    chains = common_chains(data, module_conds, len(ecfg["protocol"]["steps"]))
+    compared = restrict(data, chains)
     initial = M.aggregate(_recs(data, condition="self_healing", step=0))
     sustained = {c: M.aggregate(_recs(data, condition=c)) for c in ecfg["conditions"]}
     healing = healing_section(data)
@@ -636,8 +673,9 @@ def build(exp) -> dict:
                 "sites_sustained_f1_ge_0_80": sum(1 for s in rq5_sites if s["self_healing_sustained_f1"] >= 0.8)},
         "paired_comparison": paired,
         "conditions_run": module_conds,
-        "modules": module_rows(data, module_conds),
-        "paired_tests": paired_tests(data, module_conds),
+        "comparison_chains": sorted(chains) if chains is not None else None,
+        "modules": module_rows(compared, module_conds),
+        "paired_tests": paired_tests(compared, module_conds),
         "per_repetition": per_rep,
         "repetition_summary": rep_summary,
         "tokens": tokens,
@@ -756,6 +794,11 @@ def render_markdown(rep: dict) -> str:
 
     if rep.get("modules"):
         L.append("## Module comparison\n")
+        ch = rep.get("comparison_chains")
+        if ch is not None:
+            L.append(f"Compared on the {len(ch)} site-repetition chains that every module completed "
+                     f"({len({c[0] for c in ch})} sites, repetitions "
+                     f"{', '.join(str(r) for r in sorted({c[1] for c in ch}))}).  ")
         L.append("All modules run on the same snapshots and the same seeded change sequences. "
                  "Accuracy = correct field decisions / labelled field decisions; P/R/F1 are "
                  "micro-averaged field decisions (lists: items). 't0' = original page, "
