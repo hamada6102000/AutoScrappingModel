@@ -39,6 +39,10 @@ def scope_sentence(rep) -> str:
                if x in rep["config"]["conditions"] and x not in run]
     if missing:
         s += ("Not run in this build of the results: " + ", ".join(missing) + ". ")
+    mreps = rep.get("module_repetitions") or {}
+    if mreps and len({tuple(v) for v in mreps.values()}) > 1:
+        s += "Completed repetitions per module: " + "; ".join(
+            f"{COND_INFO[k]['label']} {', '.join(str(x) for x in v) or 'none'}" for k, v in mreps.items()) + ". "
     ch = rep.get("comparison_chains")
     if ch is not None:
         s += (f"Modules are compared on the {len(ch)} site-repetition chains completed by every module "

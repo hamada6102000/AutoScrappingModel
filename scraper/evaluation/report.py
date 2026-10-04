@@ -674,6 +674,8 @@ def build(exp) -> dict:
         "paired_comparison": paired,
         "conditions_run": module_conds,
         "comparison_chains": sorted(chains) if chains is not None else None,
+        "module_repetitions": {c: sorted({r for _, r in complete_chains(data, c, len(ecfg["protocol"]["steps"]))})
+                               for c in module_conds},
         "modules": module_rows(compared, module_conds),
         "paired_tests": paired_tests(compared, module_conds),
         "per_repetition": per_rep,

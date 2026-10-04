@@ -272,3 +272,13 @@ class CommonChainTests(TempDataDirMixin, TestCase):
         self.assertEqual(rep["comparison_chains"], [("shop-product", 1)])
         res = verify(exp)
         self.assertTrue(res["ok"], res["checks"])
+
+
+class RepSubsetTests(TempDataDirMixin, TestCase):
+    def test_only_the_requested_repetition_runs(self):
+        exp = ModuleConditionTests.prepare(self, ["rule_based", "rule_static"])
+        EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"], reps=[1]).run()
+        self.assertEqual(set(ScrapeRun.objects.filter(experiment=exp).values_list("repetition", flat=True)), {1})
+        from scraper.evaluation.protocol import EvalError
+        with self.assertRaises(EvalError):
+            EvaluationRunner(exp, write=lambda m: None, reps=[3])

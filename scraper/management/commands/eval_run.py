@@ -37,6 +37,8 @@ class Command(BaseCommand):
         parser.add_argument("--allow-unlabelled", action="store_true",
                             help="Run even if some fields have no ground-truth label; those "
                                  "fields are scraped but not scored (reported as unscored).")
+        parser.add_argument("--reps", help="Comma-separated repetitions to run now (e.g. 1). "
+                            "Default: all repetitions of the experiment.")
         parser.add_argument("--skip-unavailable", action="store_true",
                             help="Skip (and list) sites whose page could not be saved.")
         parser.add_argument("--max-hours", type=float, default=72.0,
@@ -72,7 +74,8 @@ class Command(BaseCommand):
                                           max_llm_calls=opts["max_llm_calls"], sites=sites,
                                           conditions=site_list(opts.get("conditions")),
                                           allow_unlabelled=opts["allow_unlabelled"],
-                                          skip_unavailable=opts["skip_unavailable"])
+                                          skip_unavailable=opts["skip_unavailable"],
+                                          reps=[int(x) for x in opts["reps"].split(",")] if opts.get("reps") else None)
             except Exception as exc:
                 raise CommandError(f"Cannot start: {exc}") from exc
             try:

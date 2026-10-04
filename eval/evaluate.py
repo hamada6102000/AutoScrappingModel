@@ -52,8 +52,10 @@ LLM = [
     ("Check the LLM (model list, one tiny call, limits)", M("eval_check", "--ping", "--allow-unlabelled"), False),
     ("Use the account's measured token limits", M("eval_sync_llm_limits", "--config", str(Path("eval") / "sites.yaml")), True),
     ("Re-check the saved pages with those limits", M("eval_audit"), True),
-    ("Run the LLM-based modules (sleeps through rate limits)",
-     M("eval_run", "--allow-unlabelled", "--skip-unavailable", "--wait"), False),
+    # Decision 2026-10-04 (free Groq tier): the LLM modules run repetition 1
+    # only; the rule-based modules ran 2; modules are compared on repetition 1.
+    ("Run the LLM-based modules, repetition 1 (sleeps through rate limits)",
+     M("eval_run", "--allow-unlabelled", "--skip-unavailable", "--wait", "--reps", "1"), False),
 ]
 FINISH = [
     ("Build the report, tables and figures", M("eval_report"), True),

@@ -393,7 +393,8 @@ def build_schedule(exp_cfg: dict, site_key: str, rep: int) -> list[dict]:
 class EvaluationRunner:
     def __init__(self, exp: Experiment, *, write=None, max_llm_calls: int | None = None,
                  sites: list[str] | None = None, provider=None, conditions: list[str] | None = None,
-                 allow_unlabelled: bool = False, skip_unavailable: bool = False):
+                 allow_unlabelled: bool = False, skip_unavailable: bool = False,
+                 reps: list[int] | None = None):
         self.exp = exp
         self.cfg = exp.config
         self.ecfg = self.cfg["experiment"]
@@ -401,6 +402,11 @@ class EvaluationRunner:
         self.max_llm_calls = max_llm_calls
         self.calls_made = 0
         self.allow_unlabelled = allow_unlabelled
+        all_reps = list(range(1, self.ecfg["repetitions"] + 1))
+        bad = [r for r in (reps or []) if r not in all_reps]
+        if bad:
+            raise EvalError(f"repetitions {bad} are not in the experiment (1..{self.ecfg['repetitions']})")
+        self.reps = sorted(reps) if reps else all_reps
         self.site_keys = sites or [s["key"] for s in self.cfg["sites"]]
         self.skipped_sites = []
         if skip_unavailable:
@@ -451,7 +457,7 @@ class EvaluationRunner:
                 # Repetition-major: every site finishes repetition 1 before any
                 # site starts repetition 2, so a run stopped by quota leaves
                 # complete repetitions behind.
-                for rep in range(1, self.ecfg["repetitions"] + 1):
+                for rep in self.reps:
                     for key in self.site_keys:
                         self.run_site_rep(site_by_key(self.cfg, key), rep)
         except QuotaStop as exc:
