@@ -163,12 +163,16 @@ class ScrapePipeline:
 
         # --- Layer 2: generate rules for fields that have none ----------
         missing = [f for f in fields if not f.rules.filter(is_active=True).exists()]
-        if missing and self.generate_missing:
+        # In an evaluation chain selectors are generated once, at t0; afterwards
+        # only the self-healing loop (after detection) may write selectors.
+        later_step = ctx.experiment is not None and bool(ctx.step)
+        if missing and self.generate_missing and not later_step:
             self._generate(missing, fr.dom_signature)
         elif missing:
             self._step("llm-generate:skipped", False,
                        "no rule for: " + ", ".join(f.name for f in missing)
-                       + " (generation disabled for this condition)")
+                       + (" (selectors are written only at t0 and by self-healing)" if later_step
+                          else " (generation disabled for this condition)"))
 
         # --- Layer 3: extract + validate + health -----------------------
         outcomes = self._extract(fields)

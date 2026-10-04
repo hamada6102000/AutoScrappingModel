@@ -175,3 +175,32 @@ class AuditTests(TempDataDirMixin, TestCase):
         gt = {g.field_name: g for g in snap.ground_truth.all()}
         self.assertEqual(len(gt["in_the_box"].values), 5)
         self.assertIn("prefilled", gt["sku"].notes)
+
+
+class UrlExclusionTests(TempDataDirMixin, TestCase):
+    def test_url_field_missing_from_html_is_excluded_with_reason(self):
+        import shutil
+        import tempfile
+
+        from scraper.evaluation.audit import apply_exclusions, url_exclusions
+        cfg = _config()
+        cfg["sites"][0]["fields"] = [f for f in cfg["sites"][0]["fields"] if f["name"] != "product_url"] + [
+            {"name": "page_url", "type": "url", "cardinality": "single", "required": True,
+             "description": "page URL", "source": "url", "dynamic": False,
+             "dataset_value": "https://lumen.example.test/not-on-the-page", "dataset_type": "url"}]
+        exp = init_experiment(cfg)
+        capture_snapshot(exp, cfg["sites"][0], write=lambda *_: None)
+        excl = url_exclusions(run_audit(exp))
+        self.assertEqual([(s, f) for s, f, _ in excl], [("site_001", "page_url")])
+        tmp = Path(tempfile.mkdtemp())
+        yml = tmp / "sites.yaml"
+        import yaml
+        data = to_config(load_dataset(DATASET), name="mini", repetitions=1, planned_repetitions=None)
+        data["sites"][0]["fields"].append({"name": "page_url", "type": "url", "source": "url"})
+        yml.write_text("# header\n" + yaml.safe_dump(data), encoding="utf-8")
+        self.assertEqual(apply_exclusions(yml, excl), 1)
+        text = yml.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# header"))
+        again = resolve(yaml.safe_load(text))
+        self.assertEqual([f["name"] for f in again["sites"][0]["excluded_fields"]], ["page_url"])
+        shutil.rmtree(tmp)

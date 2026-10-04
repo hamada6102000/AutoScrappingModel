@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand
 
-from scraper.evaluation.audit import NEEDS_LABEL, run_audit, write_outputs
+from scraper.evaluation.audit import (
+    NEEDS_LABEL, apply_exclusions, run_audit, url_exclusions, write_outputs,
+)
 from scraper.evaluation.cli import add_experiment_arg, get_experiment
 from scraper.services import snapshots as snapstore
 
@@ -24,6 +26,9 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         add_experiment_arg(parser)
         parser.add_argument("--out", help="Output folder (default: eval_data/<experiment>/audit).")
+        parser.add_argument("--apply-url-exclusions", metavar="CONFIG",
+                            help="Exclude, in this sites file, URL fields whose value (the page "
+                                 "address) is not in the saved HTML; then re-run eval_init.")
         parser.add_argument("--max-input-chars", type=int,
                             help="Try a different prompt HTML cap (default: the experiment's).")
 
@@ -56,3 +61,12 @@ class Command(BaseCommand):
                           f"{missing} site(s) without a snapshot.")
         for key, p in paths.items():
             self.stdout.write(f"  {key}: {p}")
+        excl = url_exclusions(rows)
+        if excl:
+            self.stdout.write(f"\nURL fields not present in the saved HTML: "
+                              + ", ".join(f"{s}.{f}" for s, f, _ in excl))
+            if opts.get("apply_url_exclusions"):
+                n = apply_exclusions(opts["apply_url_exclusions"], excl)
+                self.stdout.write(self.style.WARNING(
+                    f"Marked {n} field(s) as excluded in {opts['apply_url_exclusions']}; "
+                    "run eval_init again."))

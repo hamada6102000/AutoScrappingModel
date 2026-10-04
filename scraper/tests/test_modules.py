@@ -130,6 +130,9 @@ class ModuleConditionTests(TempDataDirMixin, TestCase):
             self.assertEqual(src, copy)
         self.assertFalse(XPathRule.objects.filter(field__target__condition="rule_static", version__gt=1).exists())
         self.assertTrue(LLMCallLog.objects.filter(provider="rule_based").exists())
+        # after t0, selectors are written only by the healing loop
+        for run in done.filter(step__gt=0, heal_attempts=0):
+            self.assertEqual(run.llm_calls_count, 0, (run.condition, run.step, run.status))
         self.assertFalse(LLMCallLog.objects.exclude(provider="rule_based").exists())
 
     def test_llm_static_waits_for_llm_t0(self):

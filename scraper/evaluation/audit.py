@@ -289,3 +289,46 @@ def write_prefilled_sheet(exp, rows, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
     return path
+
+
+URL_REASON = ("the value is the page's own address, which does not appear in the saved HTML "
+              "(no canonical link or og:url), so no selector can extract it")
+
+
+def url_exclusions(rows: list[dict]) -> list[tuple[str, str, str]]:
+    """(site, field, reason) for fields whose recorded value is the page URL
+    (dataset source "url") and that is nowhere in the saved page."""
+    out = []
+    for r in rows:
+        if not r.get("snapshot"):
+            continue
+        for f in r["fields"]:
+            if f.get("excluded") or f.get("dataset_source") != "url" or f["status"] != "not-found":
+                continue
+            out.append((r["site"], f["field"], URL_REASON))
+    return out
+
+
+def apply_exclusions(config_path, exclusions) -> int:
+    """Mark fields as excluded (with a reason) in eval/sites.yaml, keeping its
+    header comments. Returns the number of fields changed."""
+    import yaml
+    from pathlib import Path
+
+    path = Path(config_path)
+    text = path.read_text(encoding="utf-8")
+    header = "".join(line + "\n" for line in text.splitlines() if line.startswith("#"))
+    data = yaml.safe_load(text)
+    wanted = {(s, f): reason for s, f, reason in exclusions}
+    changed = 0
+    for site in data.get("sites") or []:
+        for f in site.get("fields") or []:
+            reason = wanted.get((site.get("key"), f.get("name")))
+            if reason and not f.get("exclude"):
+                f["exclude"] = True
+                f["exclude_reason"] = reason
+                changed += 1
+    if changed:
+        path.write_text(header + yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=110),
+                        encoding="utf-8")
+    return changed
