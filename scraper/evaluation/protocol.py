@@ -113,12 +113,22 @@ class ProviderStop(Exception):
 def init_experiment(config: dict, *, notes: str = "", force: bool = False) -> Experiment:
     name = config["experiment"]["name"]
     exp = Experiment.objects.filter(name=name).first()
-    if exp and exp.runs.exists():
-        if not force:
+    if exp and exp.runs.exists() and not force:
+        change = config_change(exp.config, config, exp)
+        if change == "same":
+            return exp                      # re-running eval_init is harmless
+        if change != "llm-only":
             raise EvalError(
-                f"experiment '{name}' already has {exp.runs.count()} runs. Use a new "
-                "experiment name, or --force to delete its runs and start over."
+                f"experiment '{name}' already has {exp.runs.count()} runs and the new config "
+                f"changes {change}. Use a new experiment name, or --force to delete its runs "
+                "and start over."
             )
+        # Only LLM settings changed and no LLM-module run exists yet: the
+        # completed rule-based runs are unaffected, so the update is allowed.
+        exp.config = config
+        exp.save(update_fields=["config"])
+        return exp
+    if exp and exp.runs.exists():
         exp.runs.all().delete()
         XPathRule.objects.filter(field__target__experiment=exp).delete()
     if exp is None:
@@ -139,6 +149,25 @@ def init_experiment(config: dict, *, notes: str = "", force: bool = False) -> Ex
     # Remove targets of sites/conditions no longer in the config (no runs yet).
     exp.targets.exclude(pk__in=wanted).exclude(repetition=NATURAL_REP).delete()
     return exp
+
+
+def config_change(old: dict, new: dict, exp=None) -> str:
+    """'same', 'llm-only' (only experiment.llm differs and no LLM-module run
+    exists yet) or a short description of what else differs."""
+    if old == new:
+        return "same"
+    o, n = json.loads(json.dumps(old)), json.loads(json.dumps(new))
+    o_llm, n_llm = o["experiment"].pop("llm", None), n["experiment"].pop("llm", None)
+    if o != n:
+        diff = sorted(k for k in set(o["experiment"]) | set(n["experiment"])
+                      if o["experiment"].get(k) != n["experiment"].get(k))
+        if o.get("sites") != n.get("sites"):
+            diff.append("sites/fields")
+        return ", ".join(diff) or "the configuration"
+    if o_llm == n_llm:
+        return "same"
+    llm_runs = exp is not None and exp.runs.filter(condition__in=["self_healing", "static"]).exists()
+    return "llm settings (LLM-module runs already exist)" if llm_runs else "llm-only"
 
 
 def ensure_target(exp, site: dict, condition: str, rep: int) -> ScrapeTarget:

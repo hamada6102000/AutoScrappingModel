@@ -50,6 +50,8 @@ SETUP = [
 ]
 LLM = [
     ("Check the LLM (model list, one tiny call, limits)", M("eval_check", "--ping", "--allow-unlabelled"), False),
+    ("Use the account's measured token limits", M("eval_sync_llm_limits", "--config", str(Path("eval") / "sites.yaml")), True),
+    ("Re-check the saved pages with those limits", M("eval_audit"), True),
     ("Run the LLM-based modules (sleeps through rate limits)",
      M("eval_run", "--allow-unlabelled", "--skip-unavailable", "--wait"), False),
 ]

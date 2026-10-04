@@ -209,3 +209,49 @@ class PaperTextTests(TempDataDirMixin, TestCase):
         self.assertIn("| Rule-based self-healing |", text)
         tex = (Path(self._tmp) / "modules" / "results" / "paper_table_modules.tex").read_text(encoding="utf-8")
         self.assertIn("Rule-based self-healing &", tex)
+
+
+class ReinitTests(TempDataDirMixin, TestCase):
+    def test_reinit_is_harmless_and_llm_settings_can_change_before_llm_runs(self):
+        from scraper.evaluation.protocol import EvalError
+        exp = ModuleConditionTests.prepare(self, ["self_healing", "static", "rule_based", "rule_static"])
+        EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"],
+                         conditions=["rule_based", "rule_static"]).run()
+        n = ScrapeRun.objects.filter(experiment=exp).count()
+        cfg = dict(exp.config)
+        init_experiment(cfg)                                   # same config: no-op
+        self.assertEqual(ScrapeRun.objects.filter(experiment=exp).count(), n)
+        import copy
+        cfg2 = copy.deepcopy(cfg)
+        cfg2["experiment"]["llm"]["tokens_per_minute"] = 250000
+        exp2 = init_experiment(cfg2)                           # llm-only change: allowed
+        self.assertEqual(exp2.config["experiment"]["llm"]["tokens_per_minute"], 250000)
+        self.assertEqual(ScrapeRun.objects.filter(experiment=exp).count(), n)
+        cfg3 = copy.deepcopy(cfg2)
+        cfg3["experiment"]["health_threshold"] = 0.7
+        with self.assertRaises(EvalError):                     # method change: refused
+            init_experiment(cfg3)
+
+
+class SyncLimitsTests(TempDataDirMixin, TestCase):
+    def test_measured_limits_are_written_to_config_and_experiment(self):
+        import json as _json
+        import yaml as _yaml
+        from scraper.services import snapshots as snapstore
+        cfg_path = Path(self._tmp) / "sites.yaml"
+        data = _yaml.safe_load(SELFTEST_CONFIG.read_text(encoding="utf-8"))
+        data["experiment"].update({"name": "sync", "conditions": ["self_healing", "static"],
+                                   "llm": {"provider": "groq", "model": "openai/gpt-oss-120b",
+                                           "tokens_per_minute": 8000, "completion_counts_in_tpm": True}})
+        for site in data["sites"]:
+            site["html_file"] = str((SELFTEST_CONFIG.parent / site["html_file"]).resolve())
+        cfg_path.write_text("# head\n" + _yaml.safe_dump(data), encoding="utf-8")
+        exp = init_experiment(load_config(cfg_path))
+        (snapstore.experiment_dir(exp) / "llm_ping.json").write_text(_json.dumps({
+            "ok": True, "model": "openai/gpt-oss-120b", "tokens_per_minute_reported": 250000,
+            "completion_counts_in_tpm_observed": False}), encoding="utf-8")
+        call_command("eval_sync_llm_limits", experiment="sync", config=str(cfg_path), stdout=io.StringIO())
+        exp.refresh_from_db()
+        self.assertEqual(exp.config["experiment"]["llm"]["tokens_per_minute"], 250000)
+        self.assertIs(exp.config["experiment"]["llm"]["completion_counts_in_tpm"], False)
+        self.assertTrue(cfg_path.read_text(encoding="utf-8").startswith("# head"))
