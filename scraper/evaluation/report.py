@@ -39,6 +39,8 @@ THRESHOLDS = (0.01, 0.05, 0.10, 0.20)
 METADATA_MARKERS = ("page-metadata", "data-jsonld", "data-key", "data-meta", "//meta", "/meta[",
                     "link[@rel")
 
+NON_LLM_PROVIDERS = {"heuristic", "rule_based"}   # generators that log calls but use no LLM
+
 
 def xpath_target(xpath: str | None) -> str:
     """Where a rule reads from: the page-metadata block (meta tags, JSON-LD,
@@ -128,6 +130,9 @@ def collect(exp) -> dict:
         "latency_ms": c.latency_ms, "validation_ms": c.validation_ms,
         "wait_ms": c.rate_limit_wait_ms, "retries": c.retries,
         "truncated": c.input_truncated, "success": c.success, "error": c.error,
+        "resent_too_large": (c.raw_response or "").count("[request_too_large_resent:"),
+        "json_failed": "[json_validate_failed]" in (c.raw_response or "")[:400],
+        "cut_off": "[finish_reason=length]" in (c.raw_response or "")[:400],
     } for c in LLMCallLog.objects.filter(run__experiment=exp, run__completed=True)]
     baselines = [{
         "site": s.site_key, "category": site_cat.get(s.site_key, "other"),
@@ -551,19 +556,25 @@ def build(exp) -> dict:
         "usd_priced_calls": len(priced),
     }
 
+    # Real LLM calls only; the rule-based generator logs its calls too.
+    llm = [c for c in data["calls"] if c["provider"] not in NON_LLM_PROVIDERS]
     by_purpose = defaultdict(int)
-    for c in data["calls"]:
+    for c in llm:
         by_purpose[c["purpose"]] += 1
     reliability = {
-        "llm_calls": len(data["calls"]),
+        "llm_calls": len(llm),
         "calls_by_purpose": dict(by_purpose),
-        "errors": sum(1 for c in data["calls"] if not c["success"]),
-        "fallback_calls": sum(1 for c in data["calls"] if c["fallback"]),
-        "retries": sum(c["retries"] for c in data["calls"]),
-        "rate_limit_wait_s": sum(c["wait_ms"] for c in data["calls"]) / 1000,
-        "truncated_inputs": sum(1 for c in data["calls"] if c["truncated"]),
-        "models": sorted({c["model"] for c in data["calls"] if c["model"]}),
-        "providers": sorted({c["provider"] for c in data["calls"]}),
+        "errors": sum(1 for c in llm if not c["success"]),
+        "fallback_calls": sum(1 for c in llm if c["fallback"]),
+        "retries": sum(c["retries"] for c in llm),
+        "rate_limit_wait_s": sum(c["wait_ms"] for c in llm) / 1000,
+        "truncated_inputs": sum(1 for c in llm if c["truncated"]),
+        "calls_resent_shorter_after_413": sum(1 for c in llm if c.get("resent_too_large")),
+        "answers_not_valid_json": sum(1 for c in llm if c.get("json_failed")),
+        "answers_cut_off_at_token_limit": sum(1 for c in llm if c.get("cut_off")),
+        "models": sorted({c["model"] for c in llm if c["model"]}),
+        "providers": sorted({c["provider"] for c in llm}),
+        "rule_based_generator_calls": sum(1 for c in data["calls"] if c["provider"] == "rule_based"),
     }
 
     rq4 = rq4_rows(data)
@@ -927,7 +938,9 @@ def render_markdown(rep: dict) -> str:
     L.append(f"LLM calls {rl['llm_calls']} {rl['calls_by_purpose']}; errors {rl['errors']}; "
              f"fallback calls {rl['fallback_calls']}; retries {rl['retries']}; rate-limit wait "
              f"{_num(rl['rate_limit_wait_s'], 0)} s; truncated inputs {rl['truncated_inputs']}; "
-             f"models {', '.join(rl['models']) or 'n/a'}.\n")
+             f"resent shorter after HTTP 413 {rl['calls_resent_shorter_after_413']}; answers not valid "
+             f"JSON {rl['answers_not_valid_json']}; answers cut off at the token limit "
+             f"{rl['answers_cut_off_at_token_limit']}; models {', '.join(rl['models']) or 'n/a'}.\n")
 
     if rep["baselines"]:
         L.append("## External baselines (O4)\n")

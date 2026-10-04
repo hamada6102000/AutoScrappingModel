@@ -47,7 +47,13 @@ class RateLimitExhausted(LLMError):
 
 
 class RequestTooLarge(LLMError):
-    """The prompt exceeds the provider's per-request token limit."""
+    """The prompt exceeds the provider's per-request token limit. ``limit`` and
+    ``requested`` are the provider's own token figures when it reports them."""
+
+    def __init__(self, message: str = "", limit: int | None = None, requested: int | None = None):
+        super().__init__(message)
+        self.limit = limit
+        self.requested = requested
 
 
 @dataclass

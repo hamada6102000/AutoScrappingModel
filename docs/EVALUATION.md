@@ -285,10 +285,20 @@ on 2026-08-16 (now enterprise-only) and lists `openai/gpt-oss-120b` as the
 replacement; it is the experiment's model. It is a reasoning model: the config
 sets `reasoning_effort: low` and `include_reasoning: false`. Every request is
 planned to fit the account's per-minute token limit (`tokens_per_minute`,
-checked against the limit Groq reports on `eval_check --ping`): the completion
-budget is reserved first and the page HTML is shortened at the end when needed
-(flagged as truncated in every call log). `eval_audit` shows, per field,
-whether the recorded value is inside the HTML the model actually receives.
+checked against the limit Groq reports on `eval_check --ping`). The ping also
+probes whether `max_completion_tokens` is charged against that limit up front
+(`completion_counts_in_tpm`); on the free tier it is not (a 6,899-token prompt
+with a 3,200-token completion allowance was accepted under an 8,000 TPM
+limit), so the prompt budget is 85% of the limit. The page HTML is shortened at
+the end when needed (flagged as truncated in every call log). Groq's own count
+of a request can still exceed the plan (seen once: "Limit 8000, Requested
+8259" on a healing prompt); such a request is resent with the page shortened
+by the reported excess plus 5% of the limit (at most three times), and the
+resend is recorded in that call's `raw_response`
+(`[request_too_large_resent: ...]`), retries and truncation flag. Later
+requests keep the original budget, so all LLM chains use one configuration.
+`eval_audit` shows, per field, whether the recorded value is inside the HTML
+the model actually receives.
 
 ## 6. Optional extras
 

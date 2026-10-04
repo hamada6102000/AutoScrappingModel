@@ -10,6 +10,14 @@ times and SCRAPER["LLM_MAX_WAIT_SECONDS"] of total waiting. Waiting time is
 reported separately (``rate_limit_wait_ms``) and excluded from latency. If the
 limit is still hit, ``RateLimitExhausted`` is raised so the evaluation harness
 can stop cleanly and resume later instead of recording a bogus failure.
+
+Request size: prompts are planned to fit the per-minute token limit, but
+Groq's own count of a request can come out higher than the plan. When Groq
+rejects one request as too large (HTTP 413, "Limit L, Requested N"), that
+request is resent with the page shortened by the reported excess plus a 5%
+margin (at most three times); the resend is recorded in the call's raw
+response (``[request_too_large_resent: ...]``), its retries and its
+truncation flag. Later requests keep the original plan.
 """
 
 from __future__ import annotations
@@ -25,10 +33,12 @@ from .base import (
     RateLimitExhausted, RequestTooLarge,
 )
 from .prompts import (
-    SYSTEM_PROMPT, build_prompt, completion_budget, parse_xpath_json, prompt_token_budget,
+    SYSTEM_PROMPT, build_prompt, completion_budget, conservative_counter, parse_xpath_json,
+    prompt_token_budget,
 )
 
 _WAIT_IN_MSG = re.compile(r"try again in\s+(?:(\d+)m)?\s*([\d.]+)s", re.I)
+_TOO_LARGE = re.compile(r"Limit\s+(\d+),\s*Requested\s+(\d+)", re.I)
 
 
 def _parse_wait_seconds(resp) -> Optional[float]:
@@ -94,21 +104,40 @@ class GroqProvider(LLMProvider):
         failure_history: Optional[list[FailureHint]] = None,
     ) -> LLMResult:
         max_tokens = completion_budget(len(fields), self.reasoning_effort)
-        prompt, meta = build_prompt(pruned_html, fields, failure_history, self.max_input_chars,
-                                    max_prompt_tokens=self.prompt_token_budget(max_tokens))
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ]
-        data, call = self._chat(messages, max_tokens=max_tokens)
+        budget = self.prompt_token_budget(max_tokens)
+        shrunk: list[str] = []
+        extra_retries = 0
+        while True:
+            prompt, meta = build_prompt(pruned_html, fields, failure_history, self.max_input_chars,
+                                        max_prompt_tokens=budget)
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+            try:
+                data, call = self._chat(messages, max_tokens=max_tokens)
+                break
+            except RequestTooLarge as exc:
+                # The provider's own count of this request exceeded its limit
+                # (its tokenizer / accounting differs from our plan). Shorten
+                # the page by the reported excess plus a margin and resend;
+                # only this request is affected, later ones keep the plan.
+                new = self._shrunk_budget(exc, budget, prompt)
+                if new is None or len(shrunk) >= self.MAX_SHRINKS:
+                    raise
+                shrunk.append(f"{exc.requested}>{exc.limit} tokens: prompt budget "
+                              f"{budget if budget else 'none'}->{new}")
+                budget = new
+                extra_retries += 1
         choice = (data.get("choices") or [{}])[0]
         text = (choice.get("message") or {}).get("content") or ""
         usage = data.get("usage", {}) or {}
-        note = ""
+        note = "".join(f"[request_too_large_resent: {s}] " for s in shrunk)
+        call["retries"] += extra_retries
         if call.get("json_failed"):
-            note = "[json_validate_failed] "
+            note += "[json_validate_failed] "
         elif choice.get("finish_reason") == "length":
-            note = "[finish_reason=length] "
+            note += "[finish_reason=length] "
         return LLMResult(
             xpaths=parse_xpath_json(text, fields),
             model=data.get("model") or self.model,
@@ -126,6 +155,24 @@ class GroqProvider(LLMProvider):
     def prompt_token_budget(self, max_tokens: int) -> Optional[int]:
         """Largest prompt (tokens) that keeps one request within the TPM limit."""
         return prompt_token_budget(self.tokens_per_minute, max_tokens, self.completion_counts_in_tpm)
+
+    MAX_SHRINKS = 3
+    SHRINK_MARGIN = 0.05     # of the provider's limit, on top of the reported excess
+
+    def _shrunk_budget(self, exc: RequestTooLarge, budget: Optional[int], prompt: str) -> Optional[int]:
+        """Prompt budget for resending a request the provider rejected as too
+        large, or None when it cannot be shortened (no figures, or the page
+        would have to go below the minimum)."""
+        if not exc.limit or not exc.requested or exc.requested <= exc.limit:
+            return None
+        current = conservative_counter()(SYSTEM_PROMPT + prompt)   # same counter as build_prompt
+        if budget:
+            current = min(current, budget)
+        # Covers both a fixed overhead (subtract the excess) and a tokenizer
+        # ratio (scale by limit/requested), whichever needs the shorter prompt.
+        new = min(current - (exc.requested - exc.limit), int(current * exc.limit / exc.requested))
+        new -= int(exc.limit * self.SHRINK_MARGIN)
+        return new if new >= 500 else None
 
     def list_models(self) -> list[str]:
         """Model ids this API key can use (GET /models)."""
@@ -203,7 +250,10 @@ class GroqProvider(LLMProvider):
                 retries += 1
                 continue
             if status == 413:
-                raise RequestTooLarge(f"prompt too large for {self.model}: {resp.text[:200]}")
+                m = _TOO_LARGE.search(resp.text or "")
+                raise RequestTooLarge(f"prompt too large for {self.model}: {resp.text[:200]}",
+                                      limit=int(m.group(1)) if m else None,
+                                      requested=int(m.group(2)) if m else None)
             if status == 400 and "json_validate_failed" in resp.text:
                 # The model answered, but not with valid JSON: a model output
                 # failure (scored as such), not an infrastructure error.

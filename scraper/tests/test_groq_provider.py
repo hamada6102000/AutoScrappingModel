@@ -158,6 +158,49 @@ class ReasoningModelTests(SimpleTestCase):
             res = self.make().generate_xpaths("<html><body><h1>x</h1></body></html>", FIELDS)
         self.assertTrue(res.raw_response.startswith("[finish_reason=length]"))
 
+    def _page(self):
+        return "<html><body>" + "".join(f"<p class='c{i}'>row {i} text</p>" for i in range(3000)) + "</body></html>"
+
+    def test_request_too_large_is_resent_shorter(self):
+        from scraper.llm.prompts import SYSTEM_PROMPT, conservative_counter
+        count = conservative_counter()
+        too_large = Resp(status_code=413, text='{"error":{"message":"Request too large for model ... on tokens '
+                                                'per minute (TPM): Limit 8000, Requested 8259, please reduce"}}')
+        p = self.make(reasoning_effort="low", tokens_per_minute=8000, completion_counts_in_tpm=False)
+        with mock.patch(POST, side_effect=[too_large, ok()]) as post:
+            res = p.generate_xpaths(self._page(), FIELDS)
+        first = post.call_args_list[0].kwargs["json"]["messages"][1]["content"]
+        second = post.call_args_list[1].kwargs["json"]["messages"][1]["content"]
+        n1, n2 = count(SYSTEM_PROMPT + first), count(SYSTEM_PROMPT + second)
+        self.assertLessEqual(n1, 6800)
+        expected = min(n1 - 259, int(n1 * 8000 / 8259)) - 400
+        self.assertLessEqual(n2, expected)
+        self.assertGreater(n2, expected - 50)       # shortened by what was needed, not more
+        self.assertTrue(res.input_truncated)
+        self.assertEqual(res.retries, 1)
+        self.assertTrue(res.raw_response.startswith(
+            f"[request_too_large_resent: 8259>8000 tokens: prompt budget 6800->{expected}] "))
+        self.assertEqual(res.xpaths["title"], '//h1[@class="t"]')
+        # the next request is planned as before (no state carried over)
+        with mock.patch(POST, return_value=ok()) as post:
+            p.generate_xpaths(self._page(), FIELDS)
+        self.assertEqual(post.call_args.kwargs["json"]["messages"][1]["content"], first)
+
+    def test_request_too_large_gives_up_after_three_resends(self):
+        too_large = Resp(status_code=413, text="Limit 8000, Requested 9000")
+        p = self.make(tokens_per_minute=8000, completion_counts_in_tpm=False)
+        with mock.patch(POST, return_value=too_large) as post:
+            with self.assertRaises(RequestTooLarge):
+                p.generate_xpaths(self._page(), FIELDS)
+        self.assertEqual(post.call_count, 4)
+
+    def test_request_too_large_without_figures_is_not_resent(self):
+        p = self.make(tokens_per_minute=8000)
+        with mock.patch(POST, return_value=Resp(status_code=413, text="too large")) as post:
+            with self.assertRaises(RequestTooLarge):
+                p.generate_xpaths(self._page(), FIELDS)
+        self.assertEqual(post.call_count, 1)
+
     def test_list_models_and_tpm_probe(self):
         models = Resp({"data": [{"id": "openai/gpt-oss-120b", "active": True},
                                 {"id": "old-model", "active": False}]})
