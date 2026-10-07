@@ -87,13 +87,15 @@ metric, snapshot hashes, byte-identical re-creation of every simulated page),
 `eval_paper` (`paper_results.md`, `paper_table_modules.tex`) and
 `export_results`.
 
-**LLM model: Claude Opus 5.5 on all 20 sites (decision of 2026-10-07).** The
-LLM-based modules (`self_healing`, `static`) use `claude-opus-5-5` through the
-Anthropic API on all 20 sites with 3 repetitions, the same design as the
-rule-based modules. `evaluate.bat` applies this with
+**LLM model: Claude Opus 5.5 on all 20 sites, through Claude Code with the
+Claude subscription (decision of 2026-10-07).** The LLM-based modules
+(`self_healing`, `static`) use `claude-opus-5-5` on all 20 sites with 3
+repetitions, the same design as the rule-based modules. Requests go through
+the installed **Claude Code CLI**, signed in with your Claude subscription; no
+Anthropic API key is used. `evaluate.bat` applies this with
 
 ```bat
-python manage.py eval_switch_llm --config eval\sites.yaml --provider anthropic ^
+python manage.py eval_switch_llm --config eval\sites.yaml --provider claude_code ^
     --model claude-opus-5-5 --reasoning-effort medium --max-input-chars 200000 --repetitions 3
 ```
 
@@ -105,18 +107,53 @@ python manage.py eval_switch_llm --config eval\sites.yaml --provider anthropic ^
   get a 3rd repetition. Later calls change nothing, so resuming keeps the
   Claude runs.
 - Nothing is replicated: every LLM value in the report is measured.
-- Request settings: no `temperature` (the 5.5 models reject non-default
-  sampling values), adaptive thinking steered by `effort: medium`, the answer
-  constrained to one XPath string per field by a JSON schema, and the whole
-  pruned page sent (up to 200,000 characters; the input limit per minute is
-  read from the API and synced by `eval_sync_llm_limits`). Because sampling
-  cannot be fixed, the 3 repetitions measure the run-to-run variation.
-- Costs are computed at USD 4 / 20 per million input / output tokens
-  (thinking tokens are billed as output). `evaluate.bat` sets
-  `SCRAPER_PRICING` to these prices.
-- Put `ANTHROPIC_API_KEY=sk-ant-...` (a Claude Console API key, not a claude.ai
-  subscription) in `.env` and set a spend limit in the Console. If the limit
-  is reached the run stops cleanly; raise it and run `evaluate.bat` again.
+
+**How a request is made** (`scraper/llm/claude_code_provider.py`). Each LLM
+call starts one Claude Code process:
+
+```
+claude -p --output-format stream-json --verbose --model claude-opus-5-5 --effort medium
+       --system-prompt-file <file with the project's system prompt> --tools "" --max-turns 1
+       --no-session-persistence --safe-mode --strict-mcp-config --disable-slash-commands
+stdin = the project's user prompt;  cwd = an empty folder in the system temp folder
+```
+
+- The project's system prompt and user prompt are sent unchanged. No tools,
+  no MCP servers, no CLAUDE.md memory, no saved session. `max_tokens` is set
+  with `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (12,000 + 150 per field, at most
+  32,000, as for the API provider); thinking is adaptive, depth `effort: medium`;
+  no temperature (the 5.5 models use their defaults). Because sampling cannot
+  be fixed, the 3 repetitions measure the run-to-run variation.
+- Claude Code itself adds, and this cannot be switched off without losing the
+  subscription login: a billing-header block and the line "You are a Claude
+  agent, built on Anthropic's Claude Agent SDK." before the system prompt, and
+  an environment note (working folder, platform, model id, date) after the
+  user prompt. (Checked by running Claude Code 2.1.293 against a local mock
+  endpoint and comparing the request with the project's prompts.)
+- Every answer must be a single turn. If Claude Code had to continue a reply
+  (token cap reached, or a thinking-only reply nudged), that answer is
+  discarded and the request is sent again once with twice the cap; both calls
+  are counted. A second continued reply counts as no answer.
+- The answer is parsed exactly as for the other providers (`parse_xpath_json`).
+- Latency is Claude Code's API time (`duration_api_ms`), without the CLI
+  start-up and without waiting; tokens include cached input.
+
+**Authentication.** The project never reads, stores or logs a token. Claude
+Code uses its own login: the long-lived token from `claude setup-token`, which
+it reads from the Windows user environment variable `CLAUDE_CODE_OAUTH_TOKEN`,
+or the login saved by `claude` → `/login`. Before starting Claude Code the
+project removes `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`
+and the Bedrock / Vertex switches from its environment, and every reply must
+report `apiKeySource: none` (subscription login) and the configured model,
+otherwise the call fails. `eval\claude_smoke.bat` (`manage.py
+eval_claude_smoke`) shows the exact command, the login method and the result
+of one tiny request, and saves them to `eval_data\claude_code_smoke_log.txt`.
+If Claude Code is not on `PATH`, set `CLAUDE_CODE_CLI` (in `.env`) to the full
+path of `claude.exe`.
+
+**Cost.** The subscription is not billed per token. The report's cost column is
+the API-equivalent cost (USD 4 / 20 per million input / output tokens,
+`SCRAPER_PRICING` set by `evaluate.bat`; Claude Code reports the same basis).
 
 The earlier two-site decision can still be recorded with `eval_llm_scope`
 (see `python manage.py eval_llm_scope --help`), but it is not used.
@@ -151,7 +188,7 @@ weeks later and label them again (section 6).
 |---|---|
 | Your 20 page URLs, categories and fields | `eval\sites.yaml` |
 | The correct value of every field on every saved page | the ground-truth sheet (step 4) |
-| A Claude API key (`ANTHROPIC_API_KEY`) with credit and a spend limit | `.env`, Claude Console |
+| Claude Code installed and signed in with your Claude subscription | `claude setup-token` (token in the user variable `CLAUDE_CODE_OAUTH_TOKEN`) or `claude` → `/login` |
 | Time for the LLM runs (several hours; resumable) | see section 5 |
 
 ## 3. One-time setup
@@ -166,7 +203,7 @@ copy .env.example .env
 notepad .env
 ```
 
-In `.env` set `ANTHROPIC_API_KEY=sk-ant-...`. Then:
+No API key is needed for the evaluation (Claude Code signs in with your subscription). Then:
 
 ```bat
 python manage.py migrate
@@ -297,23 +334,20 @@ containing every raw table, the report, the baseline snapshots, labeling
 views and the database. **That zip is what you send back for the paper.** It
 contains no API keys.
 
-## 5. Claude API limits and cost
+## 5. Claude subscription limits
 
-The Claude API limits requests, input tokens and output tokens per minute
-(separately; the values for your key are printed by `eval_check --ping` and
-the input limit is copied into `llm.tokens_per_minute` by
-`eval_sync_llm_limits`). On HTTP 429 the provider waits the `retry-after`
-seconds and retries; with `eval_run --wait` a longer pause is slept through.
-529 (overloaded) and 5xx answers are retried with backoff. Time spent waiting
-is recorded separately and is **excluded** from the latency metrics. A 429
-caused by the organization's spend limit cannot be waited out: the run stops
-cleanly (`LLM provider error: ... spend limit reached`); raise the limit and
-run `evaluate.bat` again.
+The subscription meters usage in a 5-hour window and a weekly window, not in
+tokens per minute. When a window is used up, Claude Code reports the reset
+time; the run stops cleanly (`LLM quota exhausted: Claude subscription usage
+limit reached (five_hour) ...`) and `eval_run --wait` sleeps until the reset
+and continues (`evaluate.bat` allows up to 168 hours). Short 429 / 529 / 5xx
+answers are retried inside Claude Code; their waiting time is recorded
+separately and is **excluded** from the latency metrics. Login, model and
+request errors stop the run (`HTTP 401 / 403 / 404 / 400 ...`): fix the cause
+and run `evaluate.bat` again; completed runs are kept.
 
 `eval_check` and `eval_run --dry-run` print the expected number of calls and
-tokens. Cost is the billed tokens times the configured price (`SCRAPER_PRICING`,
-USD 4 / 20 per million input / output tokens for claude-opus-5-5, thinking
-billed as output) and is reported per module.
+tokens.
 
 **Earlier model (2026-10-04, replaced).** Before the switch the LLM-based modules
 ran `openai/gpt-oss-120b` on the Groq free tier (8,000 tokens per minute), which
@@ -387,9 +421,11 @@ It is scored with the same labels and matching rules, on the same snapshots.
 |---|---|
 | `NOT READY ... unlabelled fields` | Fill the empty `value` cells and import again |
 | `exact tokenizer unavailable` | Be online once, then run `eval_init` again |
-| `LLM provider not usable: ANTHROPIC_API_KEY is not set` | Add the key to `.env` |
-| `HTTP 401` on the API check | Wrong or revoked key: create a new one in the Claude Console |
-| `spend limit reached` | Raise the spend limit (or add credit) in the Claude Console, then run again |
+| `Claude Code (the 'claude' command) was not found` | Install Claude Code, or set `CLAUDE_CODE_CLI` to the full path of `claude.exe` |
+| `Claude Code is not signed in` / `HTTP 401 Claude Code authentication_failed` | Add the `claude setup-token` token as the user variable `CLAUDE_CODE_OAUTH_TOKEN`, or run `claude` and `/login`; check with `eval\claude_smoke.bat` |
+| `HTTP 403 Claude Code is using an API key` | Remove the API key / `apiKeyHelper` from Claude Code's settings |
+| `HTTP 404 Claude Code model_not_found` | The model is not available to your plan; check with `eval\claude_smoke.bat` |
+| `Claude subscription usage limit reached` | Nothing to do: the run waits for the reset and continues |
 | `LLM ping failed ... 401` | The key is wrong or revoked; create a new one |
 | `Stopped early: LLM quota exhausted` | Wait for the quota to reset, then re-run `eval_run` |
 | A site's fetch fails | Save the page in your browser and use `html_file` |

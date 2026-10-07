@@ -145,6 +145,14 @@ class Command(BaseCommand):
             except Exception as exc:
                 notes.append(f"could not list models: {type(exc).__name__}: {exc}")
 
+        if hasattr(provider, "auth_status"):
+            # Claude Code: CLI version and login method (never the credential itself)
+            try:
+                record["claude_code"] = {"version": provider.cli_version(), "auth": provider.auth_status()}
+                self.stdout.write(f"\nClaude Code {record['claude_code']['version']}, login: "
+                                  f"{json.dumps(record['claude_code']['auth'])}")
+            except Exception as exc:
+                notes.append(f"could not read the Claude Code status: {type(exc).__name__}: {exc}")
         html = "<html><body><main><h1 class='title'>Ping</h1></main></body></html>"
         start = time.perf_counter()
         try:
@@ -156,6 +164,10 @@ class Command(BaseCommand):
                            "completion_tokens": res.completion_tokens,
                            "xpath": res.xpaths.get("title"), "raw": res.raw_response[:300],
                            "limits": limits})
+            if getattr(provider, "last_call", None):
+                call = provider.last_call
+                record["claude_code_call"] = {k: call.get(k) for k in (
+                    "version", "api_key_source", "models", "num_turns", "continued", "cost_usd")}
             if not res.xpaths.get("title"):
                 problems.append(f"LLM ping returned no XPath (raw: {res.raw_response[:160]!r})")
             else:
@@ -179,8 +191,8 @@ class Command(BaseCommand):
                              f"llm.tokens_per_minute: {tpm} so requests are planned to fit")
             if hasattr(provider, "completion_counts_in_tpm_documented"):
                 record["completion_counts_in_tpm_observed"] = provider.completion_counts_in_tpm_documented
-                self.stdout.write("max_tokens counted in the per-minute input limit: no (separate output "
-                                  "limit, per the provider's documentation)")
+                note = getattr(provider, "limits_note", "separate output limit, per the provider's documentation")
+                self.stdout.write(f"max_tokens counted in a per-minute input limit: no ({note})")
             elif tpm and hasattr(provider, "probe_completion_accounting"):
                 try:
                     counted = provider.probe_completion_accounting(tpm)

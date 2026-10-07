@@ -84,7 +84,7 @@ def request_plan(exp_cfg: dict, view: str, specs: list, failure_history=None) ->
     from ..llm.prompts import build_prompt, completion_budget, prompt_token_budget
 
     llm = exp_cfg["llm"]
-    if llm.get("provider") == "anthropic":
+    if llm.get("provider") in ("anthropic", "claude_code"):
         from ..llm.anthropic_provider import completion_tokens_for
 
         max_tokens = completion_tokens_for(len(specs))

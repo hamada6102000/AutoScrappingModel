@@ -48,7 +48,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--config", default="eval/sites.yaml")
-        parser.add_argument("--provider", required=True, choices=["groq", "anthropic", "openai", "ollama"])
+        parser.add_argument("--provider", required=True, choices=["groq", "anthropic", "claude_code", "openai", "ollama"])
         parser.add_argument("--model", required=True)
         parser.add_argument("--reasoning-effort", default=None)
         parser.add_argument("--max-input-chars", type=int, default=None)
@@ -101,8 +101,8 @@ class Command(BaseCommand):
                    + "): the new model runs on every site." if scope else "")))
 
         llm = {k: v for k, v in want.items() if v is not None}
-        if want["provider"] == "anthropic":
-            llm["completion_counts_in_tpm"] = False     # separate input / output per-minute limits
+        if want["provider"] in ("anthropic", "claude_code"):
+            llm["completion_counts_in_tpm"] = False     # no shared per-minute input+output token limit
         if not switching:
             llm = {**current, **llm}                    # keep measured limits (tokens_per_minute)
         data["experiment"]["llm"] = llm

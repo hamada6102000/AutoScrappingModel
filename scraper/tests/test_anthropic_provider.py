@@ -189,7 +189,7 @@ class CostAndRunnerScriptTests(SimpleTestCase):
         self.assertFalse(any("--sites" in c or "--reps" in c for c in flat))   # all sites, all reps
         switch = next(c for c in commands if "eval_switch_llm" in c)
         args = dict(zip(switch[3::2], switch[4::2]))
-        self.assertEqual(args["--provider"], "anthropic")
+        self.assertEqual(args["--provider"], "claude_code")      # subscription via Claude Code
         self.assertEqual(args["--model"], "claude-opus-5-5")
         self.assertEqual(args["--repetitions"], "3")
         steps = [c[2] for c in commands if c[1] == "manage.py"]

@@ -113,7 +113,7 @@ def resolve(data: dict, base_dir: Path | None = None) -> dict:
     if not exp.get("name") or not isinstance(exp["name"], str):
         problems.append("experiment.name is required (e.g. ieee-2026)")
     llm = exp.get("llm") or {}
-    if llm.get("provider") not in {"heuristic", "groq", "anthropic", "openai", "ollama"}:
+    if llm.get("provider") not in {"heuristic", "groq", "anthropic", "claude_code", "openai", "ollama"}:
         problems.append(f"experiment.llm.provider {llm.get('provider')!r} is not supported")
     if llm.get("max_input_chars") is not None and (
             not isinstance(llm["max_input_chars"], int) or llm["max_input_chars"] < 2000):

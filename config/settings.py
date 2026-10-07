@@ -138,6 +138,13 @@ SCRAPER = {
     "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
     "ANTHROPIC_MODEL": os.getenv("ANTHROPIC_MODEL", "claude-opus-5-5"),
 
+    # Claude through the installed Claude Code CLI, signed in with a Claude
+    # subscription (claude setup-token / claude /login). No API key is used;
+    # the CLI keeps its own credentials. CLAUDE_CODE_CLI: optional full path
+    # to claude.exe when it is not on PATH.
+    "CLAUDE_CODE_CLI": os.getenv("CLAUDE_CODE_CLI", ""),
+    "CLAUDE_CODE_MODEL": os.getenv("CLAUDE_CODE_MODEL", "claude-opus-5-5"),
+
     # OpenAI (optional).
     "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),
     "OPENAI_MODEL": os.getenv("OPENAI_MODEL", "gpt-4o"),
