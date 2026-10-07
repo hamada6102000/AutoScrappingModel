@@ -99,7 +99,7 @@ Set `SCRAPER_LLM_PROVIDER` (env var or `.env` — copy from `.env.example`):
 |----------|-------|-------|
 | Heuristic (default) | `heuristic` | Offline, no keys. Re-derives XPaths from the DOM. |
 | **Groq (free)** | `groq` | **Free**, fast LLaMA inference. Needs a free `GROQ_API_KEY`. |
-| Claude (Anthropic) | `anthropic` | Paid API. Needs `ANTHROPIC_API_KEY`. |
+| Claude (Anthropic) | `anthropic` | Paid API. Needs `ANTHROPIC_API_KEY`. **Used by the 20-site evaluation** (`claude-opus-5-5`). |
 | OpenAI GPT | `openai` | Paid. Needs `OPENAI_API_KEY` and `pip install openai`. |
 | Ollama / LLaMA | `ollama` | Free/local. Needs a running Ollama server + a pulled model. |
 
@@ -132,6 +132,10 @@ models your key can use.
 > (a key from **console.anthropic.com**, billed separately). A **claude.ai
 > Pro/Team/Enterprise chat subscription is _not_ the same thing** and cannot
 > authenticate API calls — which is why Groq is wired in as the free option.
+>
+> The paper's evaluation uses `claude-opus-5-5` (effort `medium`, no temperature,
+> JSON-schema answers) on all 20 sites, 3 repetitions: put `ANTHROPIC_API_KEY=sk-ant-...`
+> in `.env` and run `eval\evaluate.bat` (see docs/EVALUATION.md).
 
 All providers implement the same `LLMProvider` interface
 (`scraper/llm/base.py`), so swapping one in changes nothing else in the pipeline.

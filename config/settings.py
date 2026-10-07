@@ -136,7 +136,7 @@ SCRAPER = {
 
     # Anthropic / Claude (paid API — separate from claude.ai subscription).
     "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
-    "ANTHROPIC_MODEL": os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest"),
+    "ANTHROPIC_MODEL": os.getenv("ANTHROPIC_MODEL", "claude-opus-5-5"),
 
     # OpenAI (optional).
     "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY", ""),

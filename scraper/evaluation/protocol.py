@@ -84,7 +84,12 @@ def request_plan(exp_cfg: dict, view: str, specs: list, failure_history=None) ->
     from ..llm.prompts import build_prompt, completion_budget, prompt_token_budget
 
     llm = exp_cfg["llm"]
-    max_tokens = completion_budget(len(specs), llm.get("reasoning_effort"))
+    if llm.get("provider") == "anthropic":
+        from ..llm.anthropic_provider import completion_tokens_for
+
+        max_tokens = completion_tokens_for(len(specs))
+    else:
+        max_tokens = completion_budget(len(specs), llm.get("reasoning_effort"))
     cap = int(llm.get("max_input_chars") or settings.SCRAPER.get("LLM_MAX_INPUT_CHARS", 60000))
     budget = prompt_token_budget(llm.get("tokens_per_minute"), max_tokens,
                                  llm.get("completion_counts_in_tpm", True))
@@ -117,16 +122,22 @@ def init_experiment(config: dict, *, notes: str = "", force: bool = False) -> Ex
         change = config_change(exp.config, config, exp)
         if change == "same":
             return exp                      # re-running eval_init is harmless
-        if change != "llm-only":
+        if change not in ("llm-only", "additive"):
             raise EvalError(
                 f"experiment '{name}' already has {exp.runs.count()} runs and the new config "
                 f"changes {change}. Use a new experiment name, or --force to delete its runs "
                 "and start over."
             )
-        # Only LLM settings changed and no LLM-module run exists yet: the
-        # completed rule-based runs are unaffected, so the update is allowed.
+        # Only LLM settings changed with no LLM-module run yet, and/or more
+        # repetitions were added: completed runs are unaffected, so the update
+        # is allowed; targets of new repetitions are created.
         exp.config = config
         exp.save(update_fields=["config"])
+        if change == "additive":
+            for site in config["sites"]:
+                for cond in config["experiment"]["conditions"]:
+                    for rep in range(1, config["experiment"]["repetitions"] + 1):
+                        ensure_target(exp, site, cond, rep)
         return exp
     if exp and exp.runs.exists():
         exp.runs.all().delete()
@@ -152,22 +163,32 @@ def init_experiment(config: dict, *, notes: str = "", force: bool = False) -> Ex
 
 
 def config_change(old: dict, new: dict, exp=None) -> str:
-    """'same', 'llm-only' (only experiment.llm differs and no LLM-module run
-    exists yet) or a short description of what else differs."""
+    """'same'; 'llm-only' (only experiment.llm differs and no LLM-module run
+    exists yet); 'additive' (repetitions increased, possibly with an llm-only
+    change; existing runs stay valid); or a short description of what else
+    differs (refused once runs exist)."""
     if old == new:
         return "same"
     o, n = json.loads(json.dumps(old)), json.loads(json.dumps(new))
     o_llm, n_llm = o["experiment"].pop("llm", None), n["experiment"].pop("llm", None)
+    additive = False
     if o != n:
         diff = sorted(k for k in set(o["experiment"]) | set(n["experiment"])
                       if o["experiment"].get(k) != n["experiment"].get(k))
         if o.get("sites") != n.get("sites"):
             diff.append("sites/fields")
-        return ", ".join(diff) or "the configuration"
-    if o_llm == n_llm:
-        return "same"
-    llm_runs = exp is not None and exp.runs.filter(condition__in=["self_healing", "static"]).exists()
-    return "llm settings (LLM-module runs already exist)" if llm_runs else "llm-only"
+        more_reps = (diff == ["repetitions"]
+                     and int(n["experiment"]["repetitions"]) > int(o["experiment"]["repetitions"]))
+        if not more_reps:
+            return ", ".join(diff) or "the configuration"
+        additive = True
+    if o_llm != n_llm:
+        llm_runs = exp is not None and exp.runs.filter(condition__in=["self_healing", "static"]).exists()
+        if llm_runs:
+            return "llm settings (LLM-module runs already exist)"
+    if additive:
+        return "additive"
+    return "same" if o_llm == n_llm else "llm-only"
 
 
 def ensure_target(exp, site: dict, condition: str, rep: int) -> ScrapeTarget:

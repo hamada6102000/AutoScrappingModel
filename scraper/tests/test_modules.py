@@ -397,3 +397,85 @@ class LLMScopeReplicationTests(TempDataDirMixin, TestCase):
         self.assertIn("replicated to", md)
         call_command("eval_llm_scope", experiment="modules", clear=True, stdout=out)
         self.assertIsNone(report.build(exp)["llm_replication"])
+
+
+class SwitchLLMTests(TempDataDirMixin, TestCase):
+    """eval_switch_llm: new model for the LLM modules, more repetitions, old
+    LLM runs backed up and removed, rule-based runs untouched; idempotent."""
+
+    def test_switch_model_and_add_repetitions(self):
+        import csv
+
+        import yaml as _yaml
+
+        from scraper.evaluation import llm_scope
+        from scraper.models import ScrapeTarget
+        from scraper.services import snapshots as snapstore
+        cfg_path = Path(self._tmp) / "sites.yaml"
+        data = _yaml.safe_load(SELFTEST_CONFIG.read_text(encoding="utf-8"))
+        data["experiment"].update({"name": "modules", "repetitions": 1, "planned_repetitions": 3,
+                                   "conditions": ["self_healing", "static", "rule_based", "rule_static"],
+                                   "llm": {"provider": "groq", "model": "openai/gpt-oss-120b",
+                                           "tokens_per_minute": 8000}})
+        for site in data["sites"]:
+            site["html_file"] = str((SELFTEST_CONFIG.parent / site["html_file"]).resolve())
+        cfg_path.write_text("# my sites\n" + _yaml.safe_dump(data), encoding="utf-8")
+        exp = init_experiment(load_config(cfg_path))
+        out = io.StringIO()
+        call_command("eval_snapshot", experiment="modules", stdout=out)
+        call_command("eval_gt_template", experiment="modules", stdout=out)
+        base = Path(self._tmp) / "modules" / "ground_truth_baseline.csv"
+        rows = list(csv.DictReader(open(base, encoding="utf-8-sig", newline="")))
+        for r in rows:
+            r["value"] = SELFTEST_GT[r["site_key"]][r["field"]]
+        filled = Path(self._tmp) / "filled.csv"
+        with open(filled, "w", encoding="utf-8-sig", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(rows[0]))
+            w.writeheader()
+            w.writerows(rows)
+        call_command("eval_gt_import", experiment="modules", file=str(filled), verified_by="t", stdout=out)
+
+        EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"],
+                         conditions=["rule_based", "rule_static"]).run()
+        EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"], provider=HeuristicProvider(),
+                         conditions=["self_healing", "static"]).run()
+        llm_scope.save(exp, ["shop-product"], True, "test")
+        rule_runs = set(ScrapeRun.objects.filter(experiment=exp, condition__startswith="rule")
+                        .values_list("id", flat=True))
+        self.assertTrue(ScrapeRun.objects.filter(experiment=exp, condition="self_healing").exists())
+
+        msg = io.StringIO()
+        call_command("eval_switch_llm", config=str(cfg_path), provider="anthropic", model="claude-opus-5-5",
+                     reasoning_effort="medium", max_input_chars=200000, repetitions=2, stdout=msg)
+        exp.refresh_from_db()
+        self.assertIn("LLM model switched", msg.getvalue())
+        self.assertFalse(ScrapeRun.objects.filter(experiment=exp, condition__in=["self_healing", "static"]).exists())
+        self.assertEqual(set(ScrapeRun.objects.filter(experiment=exp, condition__startswith="rule")
+                             .values_list("id", flat=True)), rule_runs)          # untouched
+        llm = exp.config["experiment"]["llm"]
+        self.assertEqual((llm["provider"], llm["model"], llm["reasoning_effort"], llm["max_input_chars"]),
+                         ("anthropic", "claude-opus-5-5", "medium", 200000))
+        self.assertIs(llm["completion_counts_in_tpm"], False)
+        self.assertNotIn("tokens_per_minute", llm)                 # re-measured by the next ping
+        self.assertEqual(exp.config["experiment"]["repetitions"], 2)
+        self.assertTrue(ScrapeTarget.objects.filter(experiment=exp, condition="rule_based", repetition=2).exists())
+        self.assertIsNone(llm_scope.load(exp))                     # the new model runs on every site
+        backups = list((snapstore.experiment_dir(exp) / "backups").iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertTrue((backups[0] / "README.txt").exists())
+        self.assertTrue((backups[0] / "llm_scope.json").exists())
+        text = cfg_path.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# my sites"))
+        self.assertIn("claude-opus-5-5", text)
+
+        again = io.StringIO()                                      # idempotent
+        call_command("eval_switch_llm", config=str(cfg_path), provider="anthropic", model="claude-opus-5-5",
+                     reasoning_effort="medium", max_input_chars=200000, repetitions=2, stdout=again)
+        self.assertIn("nothing to change", again.getvalue())
+        self.assertEqual(len(list((snapstore.experiment_dir(exp) / "backups").iterdir())), 1)
+
+        # the added repetition runs for the rule-based modules; repetition 1 is kept
+        EvaluationRunner(exp, write=lambda m: None, sites=["shop-product"],
+                         conditions=["rule_based", "rule_static"], reps=[2]).run()
+        self.assertTrue(ScrapeRun.objects.filter(experiment=exp, condition="rule_based", repetition=2).exists())
+        self.assertTrue(rule_runs <= set(ScrapeRun.objects.filter(experiment=exp).values_list("id", flat=True)))

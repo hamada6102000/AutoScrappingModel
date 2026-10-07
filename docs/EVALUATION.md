@@ -87,45 +87,45 @@ metric, snapshot hashes, byte-identical re-creation of every simulated page),
 `eval_paper` (`paper_results.md`, `paper_table_modules.tex`) and
 `export_results`.
 
-**LLM scope and replication (decision of 2026-10-04).** Because of the Groq
-free-tier token and time limits, the project supervisor decided that the
-LLM-based modules (`self_healing`, `static`) are executed on `site_001` and
-`site_002` only (repetition 1), and that the values measured there are used
-as the LLM result for all 20 websites. `evaluate.bat` records this with
+**LLM model: Claude Opus 5.5 on all 20 sites (decision of 2026-10-07).** The
+LLM-based modules (`self_healing`, `static`) use `claude-opus-5-5` through the
+Anthropic API on all 20 sites with 3 repetitions, the same design as the
+rule-based modules. `evaluate.bat` applies this with
 
 ```bat
-python manage.py eval_llm_scope --llm-sites site_001,site_002 --replicate-to-all-sites --reason "..."
+python manage.py eval_switch_llm --config eval\sites.yaml --provider anthropic ^
+    --model claude-opus-5-5 --reasoning-effort medium --max-input-chars 200000 --repetitions 3
 ```
 
-(`eval_data/<exp>/llm_scope.json`, copied into the results as
-`llm_scope_decision.json`). With it:
+- The first time, it backs up the database and the LLM files to
+  `eval_data\<exp>\backups\<time>_before_claude-opus-5-5\`, deletes the runs of
+  the LLM-based modules made with the earlier model (gpt-oss-120b on Groq) and
+  removes the earlier two-site scope with replicated values (`llm_scope.json`).
+  Saved pages, labels and the rule-based runs are kept; the rule-based modules
+  get a 3rd repetition. Later calls change nothing, so resuming keeps the
+  Claude runs.
+- Nothing is replicated: every LLM value in the report is measured.
+- Request settings: no `temperature` (the 5.5 models reject non-default
+  sampling values), adaptive thinking steered by `effort: medium`, the answer
+  constrained to one XPath string per field by a JSON schema, and the whole
+  pruned page sent (up to 200,000 characters; the input limit per minute is
+  read from the API and synced by `eval_sync_llm_limits`). Because sampling
+  cannot be fixed, the 3 repetitions measure the run-to-run variation.
+- Costs are computed at USD 4 / 20 per million input / output tokens
+  (thinking tokens are billed as output). `evaluate.bat` sets
+  `SCRAPER_PRICING` to these prices.
+- Put `ANTHROPIC_API_KEY=sk-ant-...` (a Claude Console API key, not a claude.ai
+  subscription) in `.env` and set a spend limit in the Console. If the limit
+  is reached the run stops cleanly; raise it and run `evaluate.bat` again.
 
-- `eval_run` never executes an LLM-based module on another site, so no Groq
-  call is made for sites 003-020. The rule-based modules run on all 20 sites,
-  2 repetitions, and their results are unchanged.
-- The report adds, for each of the other 18 sites, the LLM-module values
-  measured on site_001 + site_002 (pooled over their field decisions), each
-  labelled `replicated from site_001 + site_002 (pooled; not measured on this
-  site)` (`per_site_with_llm_replication.csv`). The module table
-  (`module_comparison_with_llm_replication.csv`, report.md, paper text, LaTeX)
-  shows the LLM rows with *Sites = 2 measured + 18 replicated*; their values
-  equal the measured two-site values by construction. Figure labels say the
-  same.
-- Replicated values are not measurements: they are never stored as runs and
-  never enter a statistical test. The paired tests and the like-for-like
-  table (`module_comparison_like_for_like.csv`) use measured values only.
-- `eval_verify` checks that no LLM-based run exists outside the two sites,
-  that every replicated value equals the measured value and is labelled, and
-  that the rule-based results are reported only where they were measured.
-
-`python manage.py eval_llm_scope --clear` removes the decision (LLM modules
-on all sites, no replication).
+The earlier two-site decision can still be recorded with `eval_llm_scope`
+(see `python manage.py eval_llm_scope --help`), but it is not used.
 
 ## 1. What the evaluation does
 
 For each site and each repetition (3 by default):
 
-1. **t0 — baseline.** The saved page is cleaned and the LLM (Groq / LLaMA)
+1. **t0 — baseline.** The saved page is cleaned and the LLM (Claude Opus 5.5)
    generates one XPath per field. Each XPath is validated and, if invalid,
    repaired before it is stored (proposal §4.3 step 3). The values are compared
    with your labels: this is the **initial F1**.
@@ -151,8 +151,8 @@ weeks later and label them again (section 6).
 |---|---|
 | Your 20 page URLs, categories and fields | `eval\sites.yaml` |
 | The correct value of every field on every saved page | the ground-truth sheet (step 4) |
-| A Groq API key | `.env` |
-| Enough Groq quota, or time to resume over several days | see section 5 |
+| A Claude API key (`ANTHROPIC_API_KEY`) with credit and a spend limit | `.env`, Claude Console |
+| Time for the LLM runs (several hours; resumable) | see section 5 |
 
 ## 3. One-time setup
 
@@ -166,7 +166,7 @@ copy .env.example .env
 notepad .env
 ```
 
-In `.env` set `GROQ_API_KEY=gsk_...`. Then:
+In `.env` set `ANTHROPIC_API_KEY=sk-ant-...`. Then:
 
 ```bat
 python manage.py migrate
@@ -278,8 +278,8 @@ Useful options:
 
 - `--max-llm-calls 300` — stop after a budget (for example, to stay within a
   daily quota);
-- `--wait` — when the quota is exhausted, sleep until Groq says the limit
-  resets and continue automatically (leave the window open; `--max-hours`
+- `--wait` — when the rate limit is exhausted, sleep until the provider says
+  the limit resets and continue automatically (leave the window open; `--max-hours`
   bounds it);
 - `--sites shop-a,news-a` — run a subset.
 
@@ -297,40 +297,30 @@ containing every raw table, the report, the baseline snapshots, labeling
 views and the database. **That zip is what you send back for the paper.** It
 contains no API keys.
 
-## 5. Groq free-tier limits
+## 5. Claude API limits and cost
 
-Free-tier limits are per model and per day, and Groq changes them over time;
-check yours at https://console.groq.com/settings/limits. `eval_check` and
-`eval_run --dry-run` print the expected number of calls and tokens. If the
-quota runs out mid-run, the run pauses cleanly (`Stopped early: LLM quota
-exhausted`) and you resume later. Time spent waiting on rate limits is
-recorded separately and is **excluded** from the latency metrics.
+The Claude API limits requests, input tokens and output tokens per minute
+(separately; the values for your key are printed by `eval_check --ping` and
+the input limit is copied into `llm.tokens_per_minute` by
+`eval_sync_llm_limits`). On HTTP 429 the provider waits the `retry-after`
+seconds and retries; with `eval_run --wait` a longer pause is slept through.
+529 (overloaded) and 5xx answers are retried with backoff. Time spent waiting
+is recorded separately and is **excluded** from the latency metrics. A 429
+caused by the organization's spend limit cannot be waited out: the run stops
+cleanly (`LLM provider error: ... spend limit reached`); raise the limit and
+run `evaluate.bat` again.
 
-If the run would take too many days, the options are, in order of preference:
+`eval_check` and `eval_run --dry-run` print the expected number of calls and
+tokens. Cost is the billed tokens times the configured price (`SCRAPER_PRICING`,
+USD 4 / 20 per million input / output tokens for claude-opus-5-5, thinking
+billed as output) and is reported per module.
 
-1. continue over several days (results are identical, because the design is seeded);
-2. reduce `repetitions` to 2 (new experiment name, before any run);
-3. use Groq's paid Developer tier (same model, so comparable results);
-4. switch `model` to `openai/gpt-oss-20b` (a different model: report it as
-   such, and never mix models within one experiment).
+**Earlier model (2026-10-04, replaced).** Before the switch the LLM-based modules
+ran `openai/gpt-oss-120b` on the Groq free tier (8,000 tokens per minute), which
+forced shortened prompts and, by supervisor decision, a two-site scope with
+replicated values. Those runs are kept only in the backup made by
+`eval_switch_llm`; they are not part of the results.
 
-**Model.** Groq deprecated `llama-3.3-70b-versatile` and `llama-3.1-8b-instant`
-on 2026-08-16 (now enterprise-only) and lists `openai/gpt-oss-120b` as the
-replacement; it is the experiment's model. It is a reasoning model: the config
-sets `reasoning_effort: low` and `include_reasoning: false`. Every request is
-planned to fit the account's per-minute token limit (`tokens_per_minute`,
-checked against the limit Groq reports on `eval_check --ping`). The ping also
-probes whether `max_completion_tokens` is charged against that limit up front
-(`completion_counts_in_tpm`); on the free tier it is not (a 6,899-token prompt
-with a 3,200-token completion allowance was accepted under an 8,000 TPM
-limit), so the prompt budget is 85% of the limit. The page HTML is shortened at
-the end when needed (flagged as truncated in every call log). Groq's own count
-of a request can still exceed the plan (seen once: "Limit 8000, Requested
-8259" on a healing prompt); such a request is resent with the page shortened
-by the reported excess plus 5% of the limit (at most three times), and the
-resend is recorded in that call's `raw_response`
-(`[request_too_large_resent: ...]`), retries and truncation flag. Later
-requests keep the original budget, so all LLM chains use one configuration.
 `eval_audit` shows, per field, whether the recorded value is inside the HTML
 the model actually receives.
 
@@ -397,7 +387,9 @@ It is scored with the same labels and matching rules, on the same snapshots.
 |---|---|
 | `NOT READY ... unlabelled fields` | Fill the empty `value` cells and import again |
 | `exact tokenizer unavailable` | Be online once, then run `eval_init` again |
-| `LLM provider not usable: GROQ_API_KEY is not set` | Add the key to `.env` |
+| `LLM provider not usable: ANTHROPIC_API_KEY is not set` | Add the key to `.env` |
+| `HTTP 401` on the API check | Wrong or revoked key: create a new one in the Claude Console |
+| `spend limit reached` | Raise the spend limit (or add credit) in the Claude Console, then run again |
 | `LLM ping failed ... 401` | The key is wrong or revoked; create a new one |
 | `Stopped early: LLM quota exhausted` | Wait for the quota to reset, then re-run `eval_run` |
 | A site's fetch fails | Save the page in your browser and use `html_file` |

@@ -166,7 +166,10 @@ class Command(BaseCommand):
                 self.stdout.write("Rate limits reported for this key/model:")
                 for k, v in sorted(limits.items()):
                     self.stdout.write(f"  {k}: {v}")
-            tpm = _int(limits.get("x-ratelimit-limit-tokens"))
+            if hasattr(provider, "reported_tokens_per_minute"):
+                tpm = provider.reported_tokens_per_minute()     # e.g. Anthropic input tokens/min
+            else:
+                tpm = _int(limits.get("x-ratelimit-limit-tokens"))
             record["tokens_per_minute_reported"] = tpm
             if tpm and llm.get("tokens_per_minute") and llm["tokens_per_minute"] > tpm:
                 problems.append(f"llm.tokens_per_minute is {llm['tokens_per_minute']} but the account "
@@ -174,7 +177,11 @@ class Command(BaseCommand):
             if tpm and not llm.get("tokens_per_minute"):
                 notes.append(f"the account's per-minute token limit is {tpm}; set "
                              f"llm.tokens_per_minute: {tpm} so requests are planned to fit")
-            if tpm and hasattr(provider, "probe_completion_accounting"):
+            if hasattr(provider, "completion_counts_in_tpm_documented"):
+                record["completion_counts_in_tpm_observed"] = provider.completion_counts_in_tpm_documented
+                self.stdout.write("max_tokens counted in the per-minute input limit: no (separate output "
+                                  "limit, per the provider's documentation)")
+            elif tpm and hasattr(provider, "probe_completion_accounting"):
                 try:
                     counted = provider.probe_completion_accounting(tpm)
                 except Exception as exc:

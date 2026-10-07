@@ -59,6 +59,13 @@ class Command(BaseCommand):
             init_experiment(load_config(path))
         except (ConfigError, EvalError) as exc:
             path.write_text(text, encoding="utf-8")   # keep the file and the experiment in step
+            if "LLM-module runs already exist" in str(exc):
+                # Runs of the LLM modules were made with the stored settings; keep
+                # them for the rest of the experiment (the limit only caps prompt size).
+                self.stdout.write(self.style.WARNING(
+                    f"The account now reports tokens_per_minute {tpm}; the experiment keeps "
+                    f"{before.get('tokens_per_minute')} because LLM-module runs already exist."))
+                return
             raise CommandError(str(exc)) from exc
         self.stdout.write(self.style.SUCCESS(
             f"llm settings updated from the account: tokens_per_minute {before.get('tokens_per_minute')} -> "

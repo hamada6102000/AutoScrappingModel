@@ -550,6 +550,10 @@ class ScrapePipeline:
     # ------------------------------------------------------------------
     def _cost(self, model, prompt_tokens, completion_tokens):
         price = self.pricing.get(model or "")
+        if not price and model:
+            # a dated id returned by the API (e.g. "<model>-20261001") uses the base model's price
+            price = next((v for k, v in sorted(self.pricing.items(), key=lambda kv: -len(kv[0]))
+                          if model.startswith(k + "-")), None)
         if not price:
             return None
         return round(prompt_tokens * float(price.get("input", 0)) / 1e6
