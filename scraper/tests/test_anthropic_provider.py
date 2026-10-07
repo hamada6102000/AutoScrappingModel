@@ -139,6 +139,14 @@ class AnthropicProviderTests(SimpleTestCase):
         self.assertTrue(res.raw_response.startswith("[max_tokens"))
         self.assertEqual(res.retries, 1)
 
+    def test_cached_input_is_counted_and_noted(self):
+        usage = {"input_tokens": 100, "cache_read_input_tokens": 800, "cache_creation_input_tokens": 0,
+                 "output_tokens": 50}
+        with mock.patch(POST, return_value=ok(usage=usage)):
+            res = self.make().generate_xpaths("<html></html>", FIELDS)
+        self.assertEqual(res.prompt_tokens, 900)
+        self.assertIn("[cached_input_tokens=800]", res.raw_response)
+
     def test_list_models_pages(self):
         pages = [Resp({"data": [{"id": "claude-opus-5-5"}], "has_more": True, "last_id": "claude-opus-5-5"}),
                  Resp({"data": [{"id": "claude-haiku-5-5"}], "has_more": False})]

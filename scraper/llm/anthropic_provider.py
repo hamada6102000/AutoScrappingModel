@@ -134,7 +134,10 @@ class AnthropicProvider(LLMProvider):
             data = data2
         text = _text(data)
         usage = data.get("usage") or {}
-        prompt_tokens = (usage.get("input_tokens") or 0) + (first_usage.get("input_tokens") or 0)
+        # No cache_control is sent, so cached input should be 0; any cached tokens
+        # are still counted as input (an upper bound on cost) and noted.
+        prompt_tokens = _input(usage) + _input(first_usage)
+        cached = _cached(usage) + _cached(first_usage)
         completion_tokens = (usage.get("output_tokens") or 0) + (first_usage.get("output_tokens") or 0)
         self.last_thinking_tokens = _thinking(usage) + _thinking(first_usage)
         stop = data.get("stop_reason")
@@ -144,6 +147,8 @@ class AnthropicProvider(LLMProvider):
             notes.append("[stop_reason=refusal]")
         if self.last_thinking_tokens:
             notes.append(f"[thinking_tokens={self.last_thinking_tokens}]")
+        if cached:
+            notes.append(f"[cached_input_tokens={cached}]")
         return LLMResult(
             xpaths=parse_xpath_json(text, fields),
             model=data.get("model") or self.model,
@@ -240,6 +245,15 @@ class AnthropicProvider(LLMProvider):
 
 def _text(data: dict) -> str:
     return "".join(b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text")
+
+
+def _cached(usage: dict) -> int:
+    usage = usage or {}
+    return (usage.get("cache_creation_input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0)
+
+
+def _input(usage: dict) -> int:
+    return ((usage or {}).get("input_tokens") or 0) + _cached(usage)
 
 
 def _thinking(usage: dict) -> int:
