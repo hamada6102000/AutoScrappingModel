@@ -220,6 +220,42 @@ class HarnessTests(TempDataDirMixin, TestCase):
         self.assertEqual(rows["autoscraper"]["tp"], 1)
         self.assertIn("self_healing (same snapshots)", rows)
 
+    def test_sensitivity_sets_aside_by_audit_rule_only(self):
+        from scraper.evaluation import report as report_mod
+        from scraper.evaluation import sensitivity as sens
+
+        exp = self.prepare()
+        quiet("eval_run")
+        sites = [s["key"] for s in exp.config["sites"]]
+        # audit rows (normally from run_audit): one site with 2 of 4 values missing, one with 1 of 4
+        rows = []
+        for i, key in enumerate(sites):
+            missing = 2 if i == 0 else (1 if i == 1 else 0)
+            rows.append({"site": key, "fields": [{"field": f"f{j}", "status": "not-found" if j < missing else "found",
+                                                  "excluded": False} for j in range(4)]
+                         + [{"field": "x", "status": "not-found", "excluded": True}]})
+        rep = sens.build(exp, 0.25, audit_rows=rows)
+        self.assertEqual(rep["sites_set_aside"], sorted(sites[:2]))  # 50% and 25% are >= 25%
+        self.assertAlmostEqual(rep["site_shares"][sites[1]]["share"], 0.25)
+        rep = sens.build(exp, 0.3, audit_rows=rows)
+        self.assertEqual(rep["sites_set_aside"], [sites[0]])
+        full, sub = rep["all_sites"], rep["without_set_aside"]
+        self.assertEqual(full["sites"], sorted(sites))
+        self.assertEqual(sub["sites"], sorted(sites[1:]))
+        for t in sub["paired_tests"]:
+            self.assertLessEqual(t["sites"], len(sites) - 1)
+        # the all-sites view reproduces the primary report exactly
+        primary = {m["condition"]: m for m in report_mod.build(exp)["modules"]}
+        for m in full["modules"]:
+            for k in ("initial_f1", "changed_f1", "overall_f1", "healing_success_rate",
+                      "false_alarms_per_monitoring_run"):
+                self.assertEqual(m[k], primary[m["condition"]][k], k)
+        self.assertIn("Post hoc", sens.markdown(rep))
+        out = quiet("eval_sensitivity", min_not_found_share=0.25)
+        self.assertIn("Post hoc sensitivity analysis", out)
+        results = snapstore.experiment_dir(exp) / "results"
+        self.assertTrue((results / "sensitivity.md").exists() and (results / "sensitivity.json").exists())
+
     def test_schedule_is_deterministic_and_complete(self):
         cfg = resolve({"experiment": {"name": "x"}, "sites": [{"key": "a", "url": "https://a.test",
                                                                "fields": [{"name": "t"}]}]})

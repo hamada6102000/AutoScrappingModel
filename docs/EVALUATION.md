@@ -158,6 +158,16 @@ the API-equivalent cost (USD 4 / 20 per million input / output tokens,
 The earlier two-site decision can still be recorded with `eval_llm_scope`
 (see `python manage.py eval_llm_scope --help`), but it is not used.
 
+**Post hoc sensitivity analysis.** `python manage.py eval_sensitivity` (also run
+by `evaluate.bat` and included in the results bundle) recomputes the module
+table, the paired tests and the target metrics without the sites on which at
+least 25% of the evaluated fields have a recorded value that does not occur in
+the saved HTML (`--min-not-found-share`, from the configuration audit, which is
+fixed before any LLM call and does not depend on any result). It writes
+`results/sensitivity.md` and `sensitivity.json`. It is reported next to the
+primary results on all sites, never instead of them; sites are never selected
+by their results.
+
 ## 1. What the evaluation does
 
 For each site and each repetition (3 by default):

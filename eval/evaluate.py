@@ -91,6 +91,8 @@ LLM = [
 FINISH = [
     ("Build the report, tables and figures", M("eval_report"), True),
     ("Verify every reported number", M("eval_verify"), False),
+    ("Post hoc sensitivity analysis (sites whose saved page lacks >= 25% of the recorded values)",
+     M("eval_sensitivity"), False),
     ("Write the results section text", M("eval_paper"), False),
     ("Export the results bundle", M("export_results"), False),
 ]

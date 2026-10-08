@@ -90,6 +90,11 @@ def export(exp, out_zip: Path, snapshots: str = "baseline") -> Path:
     rep_json = json.loads((work / "results" / "summary.json").read_text(encoding="utf-8"))
     (work / "results" / "paper_results.md").write_text(results_markdown(rep_json), encoding="utf-8")
     (work / "results" / "paper_table_modules.tex").write_text(results_latex(rep_json), encoding="utf-8")
+    from . import sensitivity as sens
+
+    srep = sens.build(exp)   # post hoc sensitivity analysis, next to the primary results
+    (work / "results" / "sensitivity.json").write_text(json.dumps(srep, indent=2, default=str), encoding="utf-8")
+    (work / "results" / "sensitivity.md").write_text(sens.markdown(srep), encoding="utf-8")
     del rep
     # audit of the saved pages against the annotated dataset, if one was made
     audit_dir = snapstore.experiment_dir(exp) / "audit"
